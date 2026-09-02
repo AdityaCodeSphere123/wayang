@@ -48,6 +48,15 @@ public interface EstimatableCost {
 
     public ProbabilisticDoubleInterval getParallelEstimate(PlanImplementation plan, boolean isOverheadIncluded);
 
+    /**
+     * Two-objective cost {@code (latency, monetary)}. The default maps the scalar estimate onto both axes
+     * so existing {@link EstimatableCost} implementations keep compiling.
+     */
+    default VectorCost getVectorEstimate(PlanImplementation plan, boolean isOverheadIncluded) {
+        final double scalar = this.getSquashedEstimate(plan, isOverheadIncluded);
+        return new VectorCost(scalar, scalar);
+    }
+
     /** Returns a squashed cost estimate. */
     public double getSquashedEstimate(PlanImplementation plan, boolean isOverheadIncluded);
 

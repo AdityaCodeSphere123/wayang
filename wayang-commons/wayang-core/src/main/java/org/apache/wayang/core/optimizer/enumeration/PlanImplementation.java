@@ -24,6 +24,7 @@ import org.apache.wayang.core.optimizer.ProbabilisticDoubleInterval;
 import org.apache.wayang.core.optimizer.costs.TimeEstimate;
 import org.apache.wayang.core.optimizer.costs.TimeToCostConverter;
 import org.apache.wayang.core.optimizer.costs.EstimatableCost;
+import org.apache.wayang.core.optimizer.costs.VectorCost;
 import org.apache.wayang.core.plan.executionplan.Channel;
 import org.apache.wayang.core.plan.executionplan.ExecutionTask;
 import org.apache.wayang.core.plan.wayangplan.ElementaryOperator;
@@ -678,6 +679,22 @@ public class PlanImplementation {
         } else {
             return this.costModel.getSquashedEstimate(this, isIncludeOverhead);
         }
+    }
+
+    /**
+     * Two-objective cost of this plan: estimated latency and estimated monetary cost.
+     */
+    public VectorCost getVectorCostEstimate() {
+        return this.getVectorCostEstimate(true);
+    }
+
+    /**
+     * Two-objective cost of this plan: estimated latency and estimated monetary cost.
+     *
+     * @param isIncludeOverhead whether to include platform start-up overhead
+     */
+    public VectorCost getVectorCostEstimate(boolean isIncludeOverhead) {
+        return this.costModel.getVectorEstimate(this, isIncludeOverhead);
     }
 
 

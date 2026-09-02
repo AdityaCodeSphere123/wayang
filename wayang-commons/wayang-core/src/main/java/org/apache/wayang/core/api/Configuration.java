@@ -60,6 +60,7 @@ import org.apache.wayang.core.util.fs.FileSystem;
 import org.apache.wayang.core.util.fs.FileSystems;
 import org.apache.wayang.core.optimizer.costs.EstimatableCost;
 import org.apache.wayang.core.optimizer.costs.DefaultEstimatableCost;
+import org.apache.wayang.core.optimizer.costs.VectorEstimatableCost;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -102,6 +103,7 @@ public class Configuration implements Serializable {
         Actions.doSafe(() -> bootstrapPruningProviders(defaultConfiguration));
         Actions.doSafe(() -> bootstrapProperties(defaultConfiguration));
         Actions.doSafe(() -> bootstrapPlugins(defaultConfiguration));
+        Actions.doSafe(() -> bootstrapCostModel(defaultConfiguration));
     }
 
     private static final String BASIC_PLUGIN = "org.apache.wayang.basic.WayangBasics.defaultPlugin()";
@@ -291,6 +293,10 @@ public class Configuration implements Serializable {
                 } else {
                     logger.warn("Cannot set unknown cost comparator \"{}\".", value);
                 }
+                break;
+            case "wayang.core.optimizer.cost.model":
+                applyCostModel(this, value);
+                this.setProperty(key, value);
                 break;
             default:
                 this.setProperty(key, value);
@@ -602,6 +608,20 @@ public class Configuration implements Serializable {
         configuration.setProperties(customizableProperties);
 
 
+    }
+
+    private static void bootstrapCostModel(Configuration configuration) {
+        applyCostModel(configuration, configuration.getStringProperty("wayang.core.optimizer.cost.model", "default"));
+    }
+
+    private static void applyCostModel(Configuration configuration, String model) {
+        if (model == null || model.isEmpty() || "default".equalsIgnoreCase(model)) {
+            configuration.setCostModel(new DefaultEstimatableCost());
+        } else if ("vector".equalsIgnoreCase(model)) {
+            configuration.setCostModel(new VectorEstimatableCost());
+        } else {
+            logger.warn("Unknown cost model \"{}\"; keeping the current instance.", model);
+        }
     }
 
     /**

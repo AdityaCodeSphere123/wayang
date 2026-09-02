@@ -28,6 +28,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -41,8 +43,16 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
 
     private static final Logger logger = LogManager.getLogger(LatentOperatorPruningStrategy.class);
 
+    private boolean vectorPruning;
+    private double epsilon;
+
     @Override
     public void configure(Configuration configuration) {
+        this.vectorPruning = configuration.getBooleanProperty("wayang.core.optimizer.objectives.vector", false);
+        this.epsilon = configuration.getDoubleProperty("wayang.core.optimizer.objectives.epsilon", 0.1d);
+        if (!Double.isFinite(this.epsilon) || this.epsilon < 0d) {
+            this.epsilon = 0d;
+        }
     }
 
     @Override
@@ -53,12 +63,17 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
         // Group plans.
         final Collection<List<PlanImplementation>> competingPlans =
                 planEnumeration.getPlanImplementations().stream()
-                        .collect(Collectors.groupingBy(LatentOperatorPruningStrategy::getInterestingProperties))
+                        .collect(Collectors.groupingBy(
+                                LatentOperatorPruningStrategy::getInterestingProperties,
+                                LinkedHashMap::new,
+                                Collectors.toList()))
                         .values();
         final List<PlanImplementation> bestPlans = competingPlans.stream()
-                .map(this::selectBestPlanNary)
+                .flatMap(group -> this.selectSurvivors(group).stream())
                 .collect(Collectors.toList());
-        planEnumeration.getPlanImplementations().retainAll(bestPlans);
+        final Collection<PlanImplementation> current = planEnumeration.getPlanImplementations();
+        current.clear();
+        current.addAll(bestPlans);
     }
 
     /**
@@ -67,10 +82,22 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
      * @param implementation whose interesting properties are requested
      * @return the interesting properties of the given {@code implementation}
      */
-    private static Tuple<Set<Platform>, Collection<ExecutionOperator>> getInterestingProperties(PlanImplementation implementation) {
+    private static Tuple<Set<Platform>, Set<ExecutionOperator>> getInterestingProperties(PlanImplementation implementation) {
         return new Tuple<>(
                 implementation.getUtilizedPlatforms(),
-                implementation.getInterfaceOperators()
+                new HashSet<>(implementation.getInterfaceOperators())
+        );
+    }
+
+    private Collection<PlanImplementation> selectSurvivors(List<PlanImplementation> planImplementations) {
+        if (!this.vectorPruning) {
+            return java.util.Collections.singletonList(this.selectBestPlanNary(planImplementations));
+        }
+        return ParetoFront.retain(
+                planImplementations,
+                plan -> plan.getVectorCostEstimate(true),
+                this.epsilon,
+                PlanImplementation.structuralComparator()
         );
     }
 
