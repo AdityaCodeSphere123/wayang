@@ -58,6 +58,36 @@ public final class VectorPlanSelection {
         return feasible.stream().min(order).orElse(null);
     }
 
+    /**
+     *minimize weighted cost among plans that
+     * respect the monetary bound; if none do, minimize weighted cost over the whole set.
+     */
+    public static <T> T selectBest(Collection<T> plans,
+                                   Function<T, VectorCost> costs,
+                                   double budget,
+                                   double latencyWeight,
+                                   double monetaryWeight,
+                                   Comparator<T> tieBreaker) {
+        if (plans == null || plans.isEmpty()) {
+            return null;
+        }
+        final boolean unconstrained = Double.isNaN(budget) || budget == Double.POSITIVE_INFINITY;
+        List<T> feasible = plans.stream()
+                .filter(plan -> unconstrained || costs.apply(plan).getMonetary() <= budget)
+                .collect(Collectors.toList());
+        if (feasible.isEmpty()) {
+            feasible = new ArrayList<>(plans);
+        }
+        final Comparator<T> order = Comparator
+                .comparingDouble((T plan) -> weightedCost(costs.apply(plan), latencyWeight, monetaryWeight))
+                .thenComparing(tieBreaker == null ? (a, b) -> 0 : tieBreaker);
+        return feasible.stream().min(order).orElse(null);
+    }
+
+    private static double weightedCost(VectorCost cost, double latencyWeight, double monetaryWeight) {
+        return latencyWeight * cost.getLatency() + monetaryWeight * cost.getMonetary();
+    }
+
     private static double score(VectorCost cost, double latencyWeight, double monetaryWeight, boolean preferCheapest) {
         if (preferCheapest) {
             return cost.getMonetary();
