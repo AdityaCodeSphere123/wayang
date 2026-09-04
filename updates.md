@@ -6,7 +6,7 @@ Requires **Java 17** and Maven. From this directory (`wayang/`):
 
 ```bash
 mvn -pl wayang-commons/wayang-core -am test \
-  -Dtest=VectorCostTest,ParetoFrontTest,CombinationSweepTest,MultiObjectiveSimulationTest,TrummerKochCorrectnessTest \
+  -Dtest=VectorCostTest,ParetoFrontTest,CombinationSweepTest,MultiObjectiveSimulationTest,TrummerKochCorrectnessTest,HybridMultiPlatformPipelineTest \
   -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
@@ -17,6 +17,7 @@ mvn -pl wayang-commons/wayang-core -am test \
 | `MultiObjectiveSimulationTest` | Prints Pareto sets while \(\varepsilon\), budget, weights, and platform rates change |
 | `CombinationSweepTest` | Grid of \(\varepsilon \times B\), weights, and Spark `$/`ms |
 | `TrummerKochCorrectnessTest` | Paper invariants: \(\alpha\)-coverage, weighted \(\rho \le \alpha\), additive prune-after-concat, Fig. 8 bounded gap |
+| `HybridMultiPlatformPipelineTest` | 5 engines × 5 operators (+ diamond join); hybrid must beat uniform/greedy and match exhaustive search |
 
 To print the sweep tables, Surefire must not hide stdout (default Maven output already shows `System.out` from these tests).
 
