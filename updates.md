@@ -70,3 +70,53 @@ For a real job, keep the defaults above. Set `wayang.java.costs.per-ms` vs `waya
 - **Coarser \(\varepsilon\):** `0.1` matches exact; \(\varepsilon=1\) front size 5 → 4; \(\varepsilon=2\) leaves 3.
 - **Spark rate:** \(B=40\): cheap Spark stays Spark; expensive Spark switches to Postgres.
 - **Trummer–Koch:** weighted pick from the \(\alpha\)-front stays within factor \(\alpha\) on additive DP. A hard bound can miss that (Fig. 8); IRA is not implemented.
+
+---
+
+## New updates (18 Sep 2026)
+
+Corner cases in scoring, α-Pareto bucketing, and the final pick are fixed. New tests compare exact Pareto DP (`ε = 0`) with α-Pareto on chains, diamonds, bushy trees, fan-in, and a branching DAG.
+
+### Corner cases that were wrong
+
+- A broken time estimate (`NaN` / `Inf`) was stored as **0**, so that plan looked free and could wipe the front. It is now **+∞**, so it loses.
+- Tiny `ε` made `log(1+ε) = 0` and blew up bucket ids. Tiny / negative / `NaN` `ε` now means **exact Pareto**.
+- Also handled: null plans, duplicate costs, weakly dominated prefixes, budget `0` or negative, and both weights unset (falls back to min latency).
+
+Fixes live in [`VectorCost.java`](wayang-commons/wayang-core/src/main/java/org/apache/wayang/core/optimizer/costs/VectorCost.java), [`ParetoFront.java`](wayang-commons/wayang-core/src/main/java/org/apache/wayang/core/optimizer/enumeration/ParetoFront.java), and [`VectorPlanSelection.java`](wayang-commons/wayang-core/src/main/java/org/apache/wayang/core/optimizer/enumeration/VectorPlanSelection.java). Coverage is in [`MultiObjectiveCornerCaseTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/MultiObjectiveCornerCaseTest.java), plus extra cases in [`VectorCostTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/costs/VectorCostTest.java) and [`ParetoFrontTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/ParetoFrontTest.java).
+
+### Tests they asked for
+
+[`ExactVsAlphaPlanShapeTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/ExactVsAlphaPlanShapeTest.java) runs exact Pareto DP (`ε = 0`) against α-Pareto (`ε = 0.1`) on:
+
+- chains (4, 8, 12 ops)
+- diamond and two diamonds
+- bushy join tree
+- wide fan-in
+- a 10-op branching DAG
+
+Small graphs are also checked against brute force. Dense cases use 8–12 platforms so the front is actually long.
+
+From this directory:
+
+```bash
+mvn -pl wayang-commons/wayang-core -am test -Dtest=ExactVsAlphaPlanShapeTest,MultiObjectiveCornerCaseTest
+```
+
+### Trade-off (slide)
+
+On a 12-op chain, 12 platforms (cartesian about \(10^{12}\)):
+
+| ε | concatenations | final subplans | time | latency ratio ρ |
+|---|---|---|---|---|
+| 0 (exact) | 103k | 134 | 24 ms | 1.00 |
+| 0.1 | 20k | 21 | 6 ms | 1.00 |
+| 0.25 | 10k | 11 | 2 ms | 1.06 |
+| 0.5 | 6k | 5 | 1.4 ms | 1.28 |
+| 1.0 | 4k | 3 | 1.1 ms | 1.18 |
+
+Bigger `ε` means fewer subplans, faster search, a slightly worse pick. Default `ε = 0.1` kept the same pick as exact here, with 80% fewer concatenations.
+
+Both DPs already cut the cartesian product down to almost nothing. α-Pareto mainly helps when the exact front is long (chains, sequential diamonds). On wide fan-in, grouping by the cut of all open sources keeps many groups of size 1, so α has little left to prune until the join. That is a real shape effect, not a bug.
+
+Exact DP matched brute force on the small chains, diamond, and bushy tree.

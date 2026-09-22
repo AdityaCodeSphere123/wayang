@@ -71,4 +71,44 @@ class ParetoFrontTest {
         List<VectorCost> front = ParetoFront.retain(Arrays.asList(a, b), c -> c, 0d);
         assertEquals(1, front.size());
     }
+
+    @Test
+    void skipsNullsAndDropsWeaklyDominatedEquals() {
+        VectorCost keep = new VectorCost(2, 4);
+        VectorCost sameMoneySlower = new VectorCost(5, 4);
+        VectorCost sameLatencyDearer = new VectorCost(2, 9);
+        List<VectorCost> front = ParetoFront.retain(
+                Arrays.asList(null, keep, sameMoneySlower, sameLatencyDearer, null),
+                c -> c,
+                0d);
+        assertEquals(1, front.size());
+        assertEquals(keep, front.get(0));
+    }
+
+    @Test
+    void tinyEpsilonMatchesExactFront() {
+        List<VectorCost> costs = Arrays.asList(
+                new VectorCost(1, 10),
+                new VectorCost(2, 8),
+                new VectorCost(4, 1)
+        );
+        assertEquals(
+                ParetoFront.retain(costs, c -> c, 0d),
+                ParetoFront.retain(costs, c -> c, 1e-18d)
+        );
+    }
+
+    @Test
+    void zeroCostAndInfiniteCostDoNotCrash() {
+        List<VectorCost> costs = Arrays.asList(
+                new VectorCost(0, 0),
+                new VectorCost(0, 12),
+                new VectorCost(Double.POSITIVE_INFINITY, Double.NaN),
+                new VectorCost(3, 3)
+        );
+        List<VectorCost> front = ParetoFront.retain(costs, c -> c, 0.1d);
+        assertEquals(1, front.size());
+        assertEquals(0d, front.get(0).getLatency());
+        assertEquals(0d, front.get(0).getMonetary());
+    }
 }

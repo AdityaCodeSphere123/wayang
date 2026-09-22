@@ -44,16 +44,19 @@ public final class VectorPlanSelection {
         if (plans == null || plans.isEmpty()) {
             return null;
         }
-        final boolean unconstrained = Double.isNaN(budget) || budget == Double.POSITIVE_INFINITY;
+        final double budgetCap = sanitizeBudget(budget);
+        final boolean unconstrained = Double.isInfinite(budgetCap) && budgetCap > 0d;
         List<T> feasible = plans.stream()
-                .filter(plan -> unconstrained || costs.apply(plan).getMonetary() <= budget)
+                .filter(plan -> unconstrained || money(costs, plan) <= budgetCap)
                 .collect(Collectors.toList());
         final boolean budgetInfeasible = feasible.isEmpty();
         if (budgetInfeasible) {
             feasible = new ArrayList<>(plans);
         }
+        final double wL = sanitizeWeight(latencyWeight);
+        final double wM = sanitizeWeight(monetaryWeight);
         final Comparator<T> order = Comparator
-                .comparingDouble((T plan) -> score(costs.apply(plan), latencyWeight, monetaryWeight, budgetInfeasible))
+                .comparingDouble((T plan) -> score(costs.apply(plan), wL, wM, budgetInfeasible))
                 .thenComparing(tieBreaker == null ? (a, b) -> 0 : tieBreaker);
         return feasible.stream().min(order).orElse(null);
     }
@@ -71,32 +74,69 @@ public final class VectorPlanSelection {
         if (plans == null || plans.isEmpty()) {
             return null;
         }
-        final boolean unconstrained = Double.isNaN(budget) || budget == Double.POSITIVE_INFINITY;
+        final double budgetCap = sanitizeBudget(budget);
+        final boolean unconstrained = Double.isInfinite(budgetCap) && budgetCap > 0d;
         List<T> feasible = plans.stream()
-                .filter(plan -> unconstrained || costs.apply(plan).getMonetary() <= budget)
+                .filter(plan -> unconstrained || money(costs, plan) <= budgetCap)
                 .collect(Collectors.toList());
         if (feasible.isEmpty()) {
             feasible = new ArrayList<>(plans);
         }
+        final double wL = sanitizeWeight(latencyWeight);
+        final double wM = sanitizeWeight(monetaryWeight);
         final Comparator<T> order = Comparator
-                .comparingDouble((T plan) -> weightedCost(costs.apply(plan), latencyWeight, monetaryWeight))
+                .comparingDouble((T plan) -> weightedCost(costs.apply(plan), wL, wM))
                 .thenComparing(tieBreaker == null ? (a, b) -> 0 : tieBreaker);
         return feasible.stream().min(order).orElse(null);
     }
 
-    private static double weightedCost(VectorCost cost, double latencyWeight, double monetaryWeight) {
-        return latencyWeight * cost.getLatency() + monetaryWeight * cost.getMonetary();
+    private static <T> double money(Function<T, VectorCost> costs, T plan) {
+        final VectorCost cost = costs.apply(plan);
+        return cost == null ? Double.POSITIVE_INFINITY : cost.getMonetary();
+    }
+
+    private static double sanitizeBudget(double budget) {
+        if (Double.isNaN(budget) || budget == Double.POSITIVE_INFINITY) {
+            return Double.POSITIVE_INFINITY;
+        }
+        if (!Double.isFinite(budget) || budget < 0d) {
+            return 0d;
+        }
+        return budget;
+    }
+
+    private static double sanitizeWeight(double weight) {
+        if (!Double.isFinite(weight) || weight < 0d) {
+            return 0d;
+        }
+        return weight;
     }
 
     private static double score(VectorCost cost, double latencyWeight, double monetaryWeight, boolean preferCheapest) {
+        if (cost == null) {
+            return Double.POSITIVE_INFINITY;
+        }
         if (preferCheapest) {
             return cost.getMonetary();
+        }
+        if (monetaryWeight == 0d && latencyWeight == 0d) {
+            return cost.getLatency();
         }
         if (monetaryWeight == 0d) {
             return cost.getLatency();
         }
         if (latencyWeight == 0d) {
             return cost.getMonetary();
+        }
+        return latencyWeight * cost.getLatency() + monetaryWeight * cost.getMonetary();
+    }
+
+    private static double weightedCost(VectorCost cost, double latencyWeight, double monetaryWeight) {
+        if (cost == null) {
+            return Double.POSITIVE_INFINITY;
+        }
+        if (latencyWeight == 0d && monetaryWeight == 0d) {
+            return cost.getLatency();
         }
         return latencyWeight * cost.getLatency() + monetaryWeight * cost.getMonetary();
     }

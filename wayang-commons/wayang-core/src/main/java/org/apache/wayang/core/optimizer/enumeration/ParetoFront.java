@@ -49,12 +49,24 @@ public final class ParetoFront {
         if (items == null || items.isEmpty()) {
             return new ArrayList<>();
         }
-        if (items.size() == 1) {
-            return new ArrayList<>(items);
+        List<T> cleaned = new ArrayList<>(items.size());
+        for (T item : items) {
+            if (item == null) {
+                continue;
+            }
+            final VectorCost cost = costs.apply(item);
+            if (cost == null) {
+                continue;
+            }
+            cleaned.add(item);
         }
-        final Collection<T> representatives = epsilon > 0d
-                ? bucketRepresentatives(items, costs, epsilon, tieBreaker)
-                : items;
+        if (cleaned.size() <= 1) {
+            return cleaned;
+        }
+        final double eps = VectorCost.finiteEpsilon(epsilon);
+        final Collection<T> representatives = eps > 0d
+                ? bucketRepresentatives(cleaned, costs, eps, tieBreaker)
+                : cleaned;
         return exactPareto(representatives, costs, tieBreaker);
     }
 

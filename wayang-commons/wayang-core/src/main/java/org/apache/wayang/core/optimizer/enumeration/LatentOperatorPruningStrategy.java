@@ -20,6 +20,7 @@ package org.apache.wayang.core.optimizer.enumeration;
 
 import org.apache.wayang.core.api.Configuration;
 import org.apache.wayang.core.api.exception.WayangException;
+import org.apache.wayang.core.optimizer.costs.VectorCost;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
 import org.apache.wayang.core.plan.wayangplan.Slot;
 import org.apache.wayang.core.platform.Platform;
@@ -49,10 +50,8 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
     @Override
     public void configure(Configuration configuration) {
         this.vectorPruning = configuration.getBooleanProperty("wayang.core.optimizer.objectives.vector", false);
-        this.epsilon = configuration.getDoubleProperty("wayang.core.optimizer.objectives.epsilon", 0.1d);
-        if (!Double.isFinite(this.epsilon) || this.epsilon < 0d) {
-            this.epsilon = 0d;
-        }
+        this.epsilon = VectorCost.finiteEpsilon(
+                configuration.getDoubleProperty("wayang.core.optimizer.objectives.epsilon", 0.1d));
     }
 
     @Override

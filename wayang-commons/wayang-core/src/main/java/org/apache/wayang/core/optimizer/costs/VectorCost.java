@@ -34,11 +34,22 @@ public final class VectorCost {
         this.monetary = sanitize(monetary);
     }
 
+    /**
+     * Negative numbers are clipped to {@code 0}. Non-finite values become {@code +∞}
+     * so a broken estimate cannot look like a free plan and dominate the front.
+     */
     private static double sanitize(double value) {
-        if (!Double.isFinite(value) || value < 0d) {
+        if (!Double.isFinite(value)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        if (value < 0d) {
             return 0d;
         }
         return value;
+    }
+
+    public boolean isFinite() {
+        return Double.isFinite(this.latency) && Double.isFinite(this.monetary);
     }
 
     public double getLatency() {
@@ -65,7 +76,10 @@ public final class VectorCost {
      * {@code α}-dominance: {@code this} is at most a factor {@code alpha} worse than {@code that} in every objective.
      */
     public boolean approximatelyDominates(VectorCost that, double alpha) {
-        if (alpha <= 1d) {
+        if (that == null) {
+            return false;
+        }
+        if (!Double.isFinite(alpha) || alpha <= 1d) {
             return this.dominates(that) || this.equals(that);
         }
         return this.latency <= alpha * that.latency && this.monetary <= alpha * that.monetary;
@@ -75,27 +89,43 @@ public final class VectorCost {
      * Logarithmically coarsens this vector so that values in a ratio-{@code (1 + epsilon)} interval share a bucket.
      */
     public VectorCost coarsen(double epsilon) {
-        if (epsilon <= 0d) {
+        final double eps = finiteEpsilon(epsilon);
+        if (eps == 0d) {
             return this;
         }
-        final double base = 1d + epsilon;
+        final double base = 1d + eps;
         return new VectorCost(coarsenCoordinate(this.latency, base), coarsenCoordinate(this.monetary, base));
     }
 
     public long[] logBuckets(double epsilon) {
-        if (epsilon <= 0d) {
+        final double eps = finiteEpsilon(epsilon);
+        if (eps == 0d) {
             return new long[]{
                     Double.doubleToLongBits(this.latency),
                     Double.doubleToLongBits(this.monetary)
             };
         }
-        final double logBase = Math.log(1d + epsilon);
+        final double logBase = Math.log1p(eps);
         return new long[]{bucket(this.latency, logBase), bucket(this.monetary, logBase)};
     }
 
-    private static double coarsenCoordinate(double value, double base) {
-        if (value <= 0d) {
+    /**
+     * {@code 0} means "exact" (no bucketing). Tiny values are also treated as exact so
+     * {@code log(1+ε)} cannot be 0 and blow up bucket indices.
+     */
+    public static double finiteEpsilon(double epsilon) {
+        if (!Double.isFinite(epsilon) || epsilon <= 0d) {
             return 0d;
+        }
+        if (Math.log1p(epsilon) < 1e-12d) {
+            return 0d;
+        }
+        return epsilon;
+    }
+
+    private static double coarsenCoordinate(double value, double base) {
+        if (value <= 0d || !Double.isFinite(value)) {
+            return value <= 0d ? 0d : Double.POSITIVE_INFINITY;
         }
         return Math.pow(base, Math.floor(Math.log(value) / Math.log(base)));
     }
@@ -104,7 +134,17 @@ public final class VectorCost {
         if (value <= 0d) {
             return Long.MIN_VALUE;
         }
-        return (long) Math.floor(Math.log(value) / logBase);
+        if (!Double.isFinite(value) || logBase <= 0d) {
+            return Long.MAX_VALUE;
+        }
+        final double idx = Math.floor(Math.log(value) / logBase);
+        if (idx >= Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        if (idx <= Long.MIN_VALUE) {
+            return Long.MIN_VALUE;
+        }
+        return (long) idx;
     }
 
     @Override

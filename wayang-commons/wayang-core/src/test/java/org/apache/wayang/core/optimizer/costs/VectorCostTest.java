@@ -61,8 +61,36 @@ class VectorCostTest {
     @Test
     void sanitizesNonFiniteValues() {
         VectorCost nan = new VectorCost(Double.NaN, Double.NEGATIVE_INFINITY);
-        assertEquals(0d, nan.getLatency());
-        assertEquals(0d, nan.getMonetary());
+        assertEquals(Double.POSITIVE_INFINITY, nan.getLatency());
+        assertEquals(Double.POSITIVE_INFINITY, nan.getMonetary());
+        assertFalse(nan.isFinite());
         assertFalse(nan.dominates(null));
+        VectorCost real = new VectorCost(10, 10);
+        assertFalse(nan.dominates(real), "a broken estimate must not look free and win");
+        assertTrue(real.dominates(nan));
+        VectorCost clipped = new VectorCost(-3, -0.5);
+        assertEquals(0d, clipped.getLatency());
+        assertEquals(0d, clipped.getMonetary());
+    }
+
+    @Test
+    void tinyEpsilonIsTreatedAsExact() {
+        assertEquals(0d, VectorCost.finiteEpsilon(-1d));
+        assertEquals(0d, VectorCost.finiteEpsilon(Double.NaN));
+        assertEquals(0d, VectorCost.finiteEpsilon(1e-18d));
+        assertEquals(0.1d, VectorCost.finiteEpsilon(0.1d), 0d);
+        VectorCost a = new VectorCost(10, 20);
+        long[] exact = a.logBuckets(0d);
+        long[] tiny = a.logBuckets(1e-18d);
+        assertEquals(exact[0], tiny[0]);
+        assertEquals(exact[1], tiny[1]);
+    }
+
+    @Test
+    void alphaDominanceIsNullSafeAndIgnoresBadAlpha() {
+        VectorCost a = new VectorCost(10, 10);
+        assertFalse(a.approximatelyDominates(null, 1.1d));
+        assertTrue(a.approximatelyDominates(a, Double.NaN));
+        assertTrue(a.approximatelyDominates(new VectorCost(11, 11), 1.2d));
     }
 }
