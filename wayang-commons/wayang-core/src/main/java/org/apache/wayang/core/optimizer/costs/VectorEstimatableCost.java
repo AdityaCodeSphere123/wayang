@@ -49,6 +49,9 @@ public class VectorEstimatableCost extends DefaultEstimatableCost {
     @Override
     public VectorCost getVectorEstimate(PlanImplementation plan, boolean isOverheadIncluded) {
         final TimeEstimate time = plan.getTimeEstimate(isOverheadIncluded);
+        if (time == null) {
+            return new VectorCost(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY);
+        }
         // Geometric mean is 0 whenever the lower bound is 0, which is common for time intervals.
         final double geometric = time.getGeometricMeanEstimate();
         final double latency = geometric > 0d ? geometric : time.getAverageEstimate();

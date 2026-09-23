@@ -58,12 +58,12 @@ public class ParetoPruningStrategy implements PlanEnumerationPruningStrategy {
                                 Collectors.toList()))
                         .values();
         final List<PlanImplementation> survivors = competingPlans.stream()
-                .flatMap(group -> ParetoFront.retain(
+                .flatMap(group -> keepAtLeastOne(group, ParetoFront.retain(
                         group,
                         plan -> plan.getVectorCostEstimate(true),
                         this.epsilon,
                         PlanImplementation.structuralComparator()
-                ).stream())
+                )).stream())
                 .collect(Collectors.toList());
         final Collection<PlanImplementation> current = planEnumeration.getPlanImplementations();
         current.clear();
@@ -75,5 +75,16 @@ public class ParetoPruningStrategy implements PlanEnumerationPruningStrategy {
                 implementation.getUtilizedPlatforms(),
                 new HashSet<>(implementation.getInterfaceOperators())
         );
+    }
+
+    private static List<PlanImplementation> keepAtLeastOne(List<PlanImplementation> group,
+                                                           List<PlanImplementation> kept) {
+        if (kept != null && !kept.isEmpty()) {
+            return kept;
+        }
+        if (group == null || group.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        return java.util.Collections.singletonList(group.get(0));
     }
 }

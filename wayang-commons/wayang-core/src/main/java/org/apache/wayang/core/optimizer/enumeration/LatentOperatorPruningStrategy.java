@@ -92,12 +92,16 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
         if (!this.vectorPruning) {
             return java.util.Collections.singletonList(this.selectBestPlanNary(planImplementations));
         }
-        return ParetoFront.retain(
+        final List<PlanImplementation> kept = ParetoFront.retain(
                 planImplementations,
                 plan -> plan.getVectorCostEstimate(true),
                 this.epsilon,
                 PlanImplementation.structuralComparator()
         );
+        if (kept.isEmpty() && !planImplementations.isEmpty()) {
+            return java.util.Collections.singletonList(planImplementations.get(0));
+        }
+        return kept;
     }
 
     private PlanImplementation selectBestPlanNary(List<PlanImplementation> planImplementation) {

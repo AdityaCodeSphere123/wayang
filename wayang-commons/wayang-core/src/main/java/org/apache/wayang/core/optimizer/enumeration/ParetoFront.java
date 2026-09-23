@@ -77,8 +77,18 @@ public final class ParetoFront {
                                                               Function<T, VectorCost> costs,
                                                               double epsilon) {
         Map<List<Long>, List<T>> grouped = new LinkedHashMap<>();
+        if (items == null) {
+            return grouped;
+        }
         for (T item : items) {
-            final long[] buckets = costs.apply(item).logBuckets(epsilon);
+            if (item == null) {
+                continue;
+            }
+            final VectorCost cost = costs.apply(item);
+            if (cost == null) {
+                continue;
+            }
+            final long[] buckets = cost.logBuckets(epsilon);
             grouped.computeIfAbsent(Arrays.asList(buckets[0], buckets[1]), key -> new ArrayList<>()).add(item);
         }
         return grouped;

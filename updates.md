@@ -120,3 +120,31 @@ Bigger `ε` means fewer subplans, faster search, a slightly worse pick. Default 
 Both DPs already cut the cartesian product down to almost nothing. α-Pareto mainly helps when the exact front is long (chains, sequential diamonds). On wide fan-in, grouping by the cut of all open sources keeps many groups of size 1, so α has little left to prune until the join. That is a real shape effect, not a bug.
 
 Exact DP matched brute force on the small chains, diamond, and bushy tree.
+
+---
+
+## New updates (22 Sep 2026)
+
+Meeting action items: more corner cases, and a large exact-DP vs α-Pareto suite on many plan shapes and sizes.
+
+### Extra corner cases
+
+[`MultiObjectiveCornerCaseTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/MultiObjectiveCornerCaseTest.java) now also covers all-equal costs, a 400-point staircase, `NaN` budget, infeasible-budget `pick` vs `selectBest`, zero vs huge costs, and infinite `ε`. 12 tests, all passing.
+
+### Extensive shape and size tests
+
+[`ExtensiveMeetingActionItemsTest.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/ExtensiveMeetingActionItemsTest.java) uses [`PlanDagSimulator.java`](wayang-commons/wayang-core/src/test/java/org/apache/wayang/core/optimizer/enumeration/PlanDagSimulator.java). For each graph it records optimization time, concatenations generated, subplans kept, how much pruning cuts the cartesian product, and latency ratio ρ (α-pick / exact-pick under the same budget).
+
+What ran (19 tests, 0 failures):
+
+- **Exact DP vs brute force:** 35 small graphs (chains, diamonds, bushy, fan-in/out, skip edges, left-deep, 12 random DAGs). Every budget pick matched.
+- **Shape × size matrix:** 65 graphs. Chains 4–16 ops × 3–12 platforms, diamonds, 2- and 3-diamonds, bushy, fan-out, branching, skip edges, left-deep, fan-in. Mean ρ **1.010**, max **1.070**, all 65 within one-shot α=1.1. Long chains get a large cut (e.g. 16×6: 73% fewer concatenations, 136 → 25 subplans, ρ=1.00). Fan-in and bushy barely shrink.
+- **40 random connected DAGs** (6–9 ops, 3–6 platforms): mean ρ **1.009**, max **1.166**.
+- **Budget tightness** (10% / 40% / 80% / unconstrained) on 6 shapes: mean ρ **1.014**. Tight budgets are a bit worse.
+- **ε grid** on chain, diamond, bushy, branch, two-diamonds: bigger `ε` → fewer subplans, faster, slightly worse pick. Default `0.1` stays near ρ=1.
+
+From this directory:
+
+```bash
+mvn -pl wayang-commons/wayang-core -am test -Dtest=ExtensiveMeetingActionItemsTest,MultiObjectiveCornerCaseTest
+```

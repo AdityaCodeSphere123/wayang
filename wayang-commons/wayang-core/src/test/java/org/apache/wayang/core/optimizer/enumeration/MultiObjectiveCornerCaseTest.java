@@ -21,6 +21,7 @@ package org.apache.wayang.core.optimizer.enumeration;
 import org.apache.wayang.core.optimizer.costs.VectorCost;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
@@ -90,6 +91,66 @@ class MultiObjectiveCornerCaseTest {
         List<Named> front = ParetoFront.retain(plans, Named::cost, 0d, BY_NAME);
         assertEquals(1, front.size());
         assertEquals("a", front.get(0).name);
+    }
+
+    @Test
+    void allEqualCostsKeepOne() {
+        List<Named> plans = Arrays.asList(named("a", 5, 5), named("b", 5, 5), named("c", 5, 5));
+        assertEquals(1, ParetoFront.retain(plans, Named::cost, 0d, BY_NAME).size());
+        assertEquals(1, ParetoFront.retain(plans, Named::cost, 0.25d, BY_NAME).size());
+    }
+
+    @Test
+    void longStaircaseExactKeepsAllAndAlphaShrinks() {
+        List<Named> stair = new ArrayList<>();
+        for (int i = 1; i <= 400; i++) {
+            stair.add(named("s" + i, i, 401 - i));
+        }
+        List<Named> exact = ParetoFront.retain(stair, Named::cost, 0d, BY_NAME);
+        List<Named> approx = ParetoFront.retain(stair, Named::cost, 0.2d, BY_NAME);
+        assertEquals(400, exact.size());
+        assertTrue(approx.size() < 80, "α-front " + approx.size());
+        for (Named orig : stair) {
+            boolean covered = approx.stream().anyMatch(rep ->
+                    rep.cost.approximatelyDominates(orig.cost, 1.2d + 1e-6));
+            assertTrue(covered, orig.name);
+        }
+    }
+
+    @Test
+    void nanBudgetIsUnconstrainedMinLatency() {
+        List<Named> plans = Arrays.asList(named("slow", 80, 1), named("fast", 9, 40));
+        Named pick = VectorPlanSelection.pick(plans, Named::cost, Double.NaN, 1d, 0d, BY_NAME);
+        assertEquals("fast", pick.name);
+    }
+
+    @Test
+    void infeasibleBudgetPickCheapestSelectBestIgnoresBound() {
+        List<Named> plans = Arrays.asList(named("cheap-slow", 200, 10), named("fast", 20, 120));
+        Named wayang = VectorPlanSelection.pick(plans, Named::cost, 1d, 1d, 0d, BY_NAME);
+        Named paper = VectorPlanSelection.selectBest(plans, Named::cost, 1d, 1d, 0d, BY_NAME);
+        assertEquals("cheap-slow", wayang.name);
+        assertEquals("fast", paper.name);
+    }
+
+    @Test
+    void hugeCostsAndZeroStayComparable() {
+        List<Named> plans = Arrays.asList(
+                named("zero", 0, 0),
+                named("huge", 1e12, 1e12),
+                named("mid", 50, 50)
+        );
+        List<Named> front = ParetoFront.retain(plans, Named::cost, 0.1d, BY_NAME);
+        assertEquals(1, front.size());
+        assertEquals("zero", front.get(0).name);
+    }
+
+    @Test
+    void infiniteEpsilonCollapsesBucketsSafely() {
+        List<Named> plans = Arrays.asList(named("a", 1, 100), named("b", 50, 50), named("c", 100, 1));
+        List<Named> front = ParetoFront.retain(plans, Named::cost, Double.POSITIVE_INFINITY, BY_NAME);
+        assertEquals(plans.size(), front.size());
+        assertEquals(0d, VectorCost.finiteEpsilon(Double.POSITIVE_INFINITY));
     }
 
     private static Named named(String name, double latency, double monetary) {
