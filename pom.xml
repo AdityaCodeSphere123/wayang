@@ -1104,6 +1104,7 @@
                         <exclude>**/.rat-excludes</exclude>
                         <exclude>**/*.csv</exclude>
                         <exclude>**/*.properties</exclude>
+                        <exclude>**/*.onnx</exclude>
                     </excludes>
                 </configuration>
             </plugin>
