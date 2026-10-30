@@ -746,6 +746,12 @@ public class Configuration implements Serializable {
         this.properties.set(key, value);
     }
 
+    public void removeProperty(String key) {
+        if (this.properties != null) {
+            this.properties.remove(key);
+        }
+    }
+
     public String getStringProperty(String key) {
         return this.properties.provideFor(key);
     }
@@ -756,6 +762,14 @@ public class Configuration implements Serializable {
 
     public String getStringProperty(String key, String fallback) {
         return this.getOptionalStringProperty(key).orElse(fallback);
+    }
+
+    public boolean isPropertyExplicitLocally(String key) {
+        return this.properties != null && this.properties.isExplicitLocally(key);
+    }
+
+    public String getExplicitLocalStringProperty(String key) {
+        return this.properties != null ? this.properties.provideExplicitLocally(key) : null;
     }
 
     public KeyValueProvider<Platform, LoadProfileToTimeConverter> getLoadProfileToTimeConverterProvider() {
