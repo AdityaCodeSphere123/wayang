@@ -40,8 +40,6 @@ public abstract class JdbcJoinOperator<KeyType>
 
     /**
      * Creates a new instance.
-     *
-     * @see JoinOperator#JoinOperator(Record, Record...)
      */
     public JdbcJoinOperator(
         TransformationDescriptor<Record, KeyType> keyDescriptor0,
