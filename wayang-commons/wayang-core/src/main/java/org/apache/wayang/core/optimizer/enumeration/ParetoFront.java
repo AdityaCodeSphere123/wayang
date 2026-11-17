@@ -84,6 +84,30 @@ public final class ParetoFront {
     }
 
     /**
+     * Like {@link #retain(Collection, Function, double, Comparator)}, but never returns more than {@code maxSize}
+     * items (when {@code maxSize > 0}). If the front at {@code epsilon} is too large, ε is raised (starting at 1%,
+     * then doubling) until it fits. The exact fastest and the exact cheapest item are always kept, so the result can
+     * exceed {@code maxSize} by at most those two. This bounds the work per group on very large plans while keeping
+     * the front exact (or at the requested ε) whenever it is small enough.
+     */
+    public static <T> List<T> retainBounded(Collection<T> items,
+                                            Function<T, VectorCost> costs,
+                                            double epsilon,
+                                            int maxSize,
+                                            Comparator<T> tieBreaker) {
+        List<T> kept = retain(items, costs, epsilon, tieBreaker);
+        if (maxSize <= 0 || kept.size() <= maxSize) {
+            return kept;
+        }
+        double eps = Math.max(VectorCost.finiteEpsilon(epsilon), 0.01d);
+        for (int attempt = 0; attempt < 30 && kept.size() > maxSize + 2; attempt++) {
+            kept = retain(items, costs, eps, tieBreaker); // from the originals, so errors do not stack
+            eps *= 2d;
+        }
+        return kept;
+    }
+
+    /**
      * Groups items by logarithmic cost buckets. Used for traces; {@link #retain} keeps one plan per group.
      */
     public static <T> Map<List<Long>, List<T>> groupByBuckets(Collection<T> items,

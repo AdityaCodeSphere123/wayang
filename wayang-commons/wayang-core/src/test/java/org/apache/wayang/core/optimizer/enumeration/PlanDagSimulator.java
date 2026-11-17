@@ -41,6 +41,39 @@ final class PlanDagSimulator {
     }
 
     static SearchResult optimize(Graph g, double epsilon) {
+        return optimize(g, epsilon, 0);
+    }
+
+    /** Same DP, but each group keeps at most {@code maxFront} plans (see {@link ParetoFront#retainBounded});
+     * {@code maxFront < 0} emulates original Wayang (one min-latency plan per group). */
+    static SearchResult optimize(Graph g, double epsilon, int maxFront) {
+        return optimize(g, epsilon, maxFront, false);
+    }
+
+    /**
+     * @param crossGroup also drop plans that are dominated by a plan of <i>another</i> group once the cost of
+     *                   switching that plan's open operators to this group's platforms is added (exact; see
+     *                   {@link #crossGroupPrune})
+     */
+    static SearchResult optimize(Graph g, double epsilon, int maxFront, boolean crossGroup) {
+        return optimize(g, epsilon, maxFront, crossGroup ? 0d : -1d);
+    }
+
+    /**
+     * @param crossGroupEps {@code < 0}: no cross-group pruning; {@code 0}: exact cross-group pruning;
+     *                      {@code > 0}: drop {@code p} if a switched-in vector is within {@code (1+ε)} of it
+     */
+    static SearchResult optimize(Graph g, double epsilon, int maxFront, double crossGroupEps) {
+        return optimize(g, epsilon, maxFront, crossGroupEps, Double.POSITIVE_INFINITY);
+    }
+
+    /**
+     * @param budget monetary bound. As in {@code ParetoPruningStrategy}: within a group, plans above the budget are
+     *               dropped whenever the group still has a plan within it (costs only grow, so this is exact). Not
+     *               applied in the original-Wayang mode ({@code maxFront < 0}), which has no notion of a budget.
+     */
+    static SearchResult optimize(Graph g, double epsilon, int maxFront, double crossGroupEps, double budget) {
+        final boolean crossGroup = crossGroupEps >= 0d;
         List<Partial> front = new ArrayList<>();
         int generated = 0;
         int peak = 0;
@@ -49,7 +82,8 @@ final class PlanDagSimulator {
             front.add(seed(g, p));
             generated++;
         }
-        front = pruneByCut(g, front, 0, epsilon);
+        front = pruneByCut(g, front, 0, epsilon, maxFront, budget);
+        if (crossGroup) front = crossGroupPrune(g, front, 0, crossGroupEps);
         peak = Math.max(peak, front.size());
         keptSum += front.size();
         for (int i = 1; i < g.nOps(); i++) {
@@ -60,7 +94,8 @@ final class PlanDagSimulator {
                 }
             }
             generated += next.size();
-            front = pruneByCut(g, next, i, epsilon);
+            front = pruneByCut(g, next, i, epsilon, maxFront, budget);
+            if (crossGroup) front = crossGroupPrune(g, front, i, crossGroupEps);
             peak = Math.max(peak, front.size());
             keptSum += front.size();
         }
@@ -225,6 +260,31 @@ final class PlanDagSimulator {
         return b.build();
     }
 
+    /**
+     * Left-deep join over {@code sources} tables in the order Wayang combines them: scan0, scan1, join1, scan2, join2,
+     * ..., sink. Only the running join result and the next scan are open at any point ({@link #leftDeep} places all
+     * scans first, which keeps every scan open at once and is not how Wayang enumerates a join tree).
+     */
+    static Graph leftDeepInterleaved(String name, int sources, int nPlats) {
+        final int n = 2 * sources;                     // sources scans + (sources - 1) joins + sink
+        final Kind[] kinds = new Kind[n];
+        kinds[0] = Kind.SCAN;
+        for (int t = 1; t < sources; t++) {
+            kinds[2 * t - 1] = Kind.SCAN;
+            kinds[2 * t] = Kind.JOIN;
+        }
+        kinds[n - 1] = Kind.SINK;
+        final Builder b = new Builder(name, nPlats, kinds);
+        int left = 0;                                   // running result
+        for (int t = 1; t < sources; t++) {
+            b.edge(left, 2 * t);
+            b.edge(2 * t - 1, 2 * t);
+            left = 2 * t;
+        }
+        b.edge(left, n - 1);
+        return b.build();
+    }
+
     static Graph randomConnected(String name, int n, int nPlats, long seed) {
         Kind[] kinds = pipelineKinds(n);
         Builder b = new Builder(name, nPlats, kinds);
@@ -264,16 +324,162 @@ final class PlanDagSimulator {
         return kinds;
     }
 
-    private static List<Partial> pruneByCut(Graph g, List<Partial> items, int placedUpTo, double epsilon) {
+    private static List<Partial> pruneByCut(Graph g, List<Partial> items, int placedUpTo, double epsilon, int maxFront,
+                                            double budget) {
         Map<String, List<Partial>> groups = new LinkedHashMap<>();
         for (Partial item : items) {
             groups.computeIfAbsent(cutKey(g, item, placedUpTo), k -> new ArrayList<>()).add(item);
         }
         List<Partial> kept = new ArrayList<>();
         for (List<Partial> group : groups.values()) {
-            kept.addAll(ParetoFront.retain(group, Partial::cost, epsilon, BY_PATH));
+            if (maxFront >= 0 && Double.isFinite(budget)) {
+                final List<Partial> feasible = new ArrayList<>();
+                for (Partial q : group) if (q.money <= budget) feasible.add(q);
+                if (!feasible.isEmpty()) group = feasible;
+            }
+            if (maxFront < 0) {
+                // Original Wayang: one plan per group, the one with the lowest scalar cost (here: latency).
+                kept.add(group.stream().min(Comparator.<Partial>comparingDouble(q -> q.cost.getLatency())
+                        .thenComparingDouble(q -> q.cost.getMonetary()).thenComparing(BY_PATH)).get());
+            } else {
+                kept.addAll(ParetoFront.retainBounded(group, Partial::cost, epsilon, maxFront, BY_PATH));
+            }
         }
         return kept;
+    }
+
+    /**
+     * Exact pruning across groups. Let {@code q} and {@code p} be partial plans whose open operators run on platforms
+     * {@code a_j} and {@code b_j}. For every completion {@code s}, the conversions {@code s} needs from the open
+     * operators cost {@code q} at most {@code Σ m_j·conv(a_j, b_j)} more than they cost {@code p}
+     * ({@code m_j} = open out-edges of {@code j}; triangle inequality {@code conv(a,x) <= conv(a,b) + conv(b,x)}).
+     * So if {@code c(q) + Σ m_j·conv(a_j, b_j)} dominates {@code c(p)}, then {@code q+s} dominates {@code p+s} for
+     * every {@code s} and {@code p} can go, even though the two plans are in different groups.
+     *
+     * <p>Comparing all pairs of groups is quadratic. The penalty is a sum over open operators, so the best
+     * "switched-in" vectors per group are computed one open operator at a time (a separable distance transform over
+     * 2-D Pareto fronts): {@code #open ops × #groups × #platforms} front merges.</p>
+     */
+    static List<Partial> crossGroupPrune(Graph g, List<Partial> items, int placedUpTo) {
+        return crossGroupPrune(g, items, placedUpTo, 0d);
+    }
+
+    /** With {@code eps > 0}, {@code p} also goes if a switched-in vector is within a factor {@code 1+eps} of it. */
+    static List<Partial> crossGroupPrune(Graph g, List<Partial> items, int placedUpTo, double eps) {
+        // Open operators and how many of their out-edges cross the cut.
+        final List<Integer> open = new ArrayList<>();
+        final List<Integer> mult = new ArrayList<>();
+        for (int j = 0; j <= placedUpTo; j++) {
+            int m = 0;
+            for (int s : g.succs[j]) if (s > placedUpTo) m++;
+            if (m > 0) {
+                open.add(j);
+                mult.add(m);
+            }
+        }
+        if (open.isEmpty() || items.size() < 2) return items;
+        final int w = open.size();
+        final int base = g.nPlats;
+
+        // Group code: platforms of the open operators in base nPlats.
+        final Map<Long, List<Partial>> groups = new LinkedHashMap<>();
+        for (Partial item : items) groups.computeIfAbsent(code(item, open, base), k -> new ArrayList<>()).add(item);
+
+        // reach.get(G): Pareto front of c(q) + penalty(q -> G), over q seen so far.
+        Map<Long, double[][]> reach = new java.util.HashMap<>(groups.size() * 2);
+        for (Map.Entry<Long, List<Partial>> e : groups.entrySet()) {
+            final double[][] pts = new double[e.getValue().size()][];
+            for (int k = 0; k < pts.length; k++) pts[k] = new double[]{e.getValue().get(k).lat, e.getValue().get(k).money};
+            reach.put(e.getKey(), front2d(pts));
+        }
+        long pow = 1;
+        for (int j = 0; j < w; j++, pow *= base) {
+            final Map<Long, double[][]> next = new java.util.HashMap<>(reach.size() * 2);
+            for (Map.Entry<Long, double[][]> e : reach.entrySet()) {
+                final long gcode = e.getKey();
+                final int a = (int) ((gcode / pow) % base);
+                final List<double[]> merged = new ArrayList<>(java.util.Arrays.asList(e.getValue()));
+                for (int b = 0; b < base; b++) {
+                    if (b == a) continue;
+                    final double[][] src = reach.get(gcode + (long) (b - a) * pow);
+                    if (src == null) continue;     // only existing groups: a smaller min, still safe
+                    final VectorCost conv = conversion(b, a);
+                    final double dl = mult.get(j) * conv.getLatency(), dm = mult.get(j) * conv.getMonetary();
+                    for (double[] v : src) merged.add(new double[]{v[0] + dl, v[1] + dm});
+                }
+                next.put(gcode, front2d(merged.toArray(new double[0][])));
+            }
+            reach = next;
+        }
+
+        final List<Partial> kept = new ArrayList<>(items.size());
+        for (Map.Entry<Long, List<Partial>> e : groups.entrySet()) {
+            final double[][] r = reach.get(e.getKey());
+            for (Partial p : e.getValue()) {
+                final boolean drop = eps > 0d
+                        ? approxDominatedByOther(r, p, eps)
+                        : strictlyDominated(r, p.lat, p.money);
+                if (!drop) kept.add(p);
+            }
+        }
+        return kept;
+    }
+
+    private static long code(Partial item, List<Integer> open, int base) {
+        long c = 0, pow = 1;
+        for (int j : open) {
+            c += item.plat[j] * pow;
+            pow *= base;
+        }
+        return c;
+    }
+
+    /** Exact 2-D Pareto front of points (minimisation), sorted by first coordinate. */
+    private static double[][] front2d(double[][] pts) {
+        java.util.Arrays.sort(pts, (x, y) -> x[0] != y[0] ? Double.compare(x[0], y[0]) : Double.compare(x[1], y[1]));
+        final List<double[]> out = new ArrayList<>();
+        double best = Double.POSITIVE_INFINITY;
+        for (double[] v : pts) {
+            if (v[1] < best) {
+                out.add(v);
+                best = v[1];
+            }
+        }
+        return out.toArray(new double[0][]);
+    }
+
+    /**
+     * Approximate cross-group test on log-buckets of width {@code 1+eps}: {@code p} goes if some switched-in vector
+     * {@code v} is in a bucket that is no worse on both axes and strictly better on one, or if {@code v} strictly
+     * dominates {@code c(p)}. Both relations only ever move to lower buckets, so they cannot form a cycle and the
+     * minimal plans always survive (no "both dropped" case). Per prune, a dropped plan is covered within
+     * {@code 1+eps} by the plan that covers it; along a chain of drops the factor can multiply, so the overall gap is
+     * measured, not guaranteed.
+     */
+    private static boolean approxDominatedByOther(double[][] front, Partial p, double eps) {
+        final double logBase = Math.log1p(eps);
+        final long bl = bucket(p.lat, logBase), bm = bucket(p.money, logBase);
+        for (double[] v : front) {
+            final long vl = bucket(v[0], logBase);
+            if (vl > bl) break;                    // sorted by latency
+            final long vm = bucket(v[1], logBase);
+            if (vm > bm) continue;
+            if (vl < bl || vm < bm) return true;
+            if (v[0] <= p.lat && v[1] <= p.money && (v[0] < p.lat || v[1] < p.money)) return true;
+        }
+        return false;
+    }
+
+    private static long bucket(double x, double logBase) {
+        return x <= 0d ? Long.MIN_VALUE : (long) Math.floor(Math.log(x) / logBase);
+    }
+
+    private static boolean strictlyDominated(double[][] front, double lat, double money) {
+        for (double[] v : front) {
+            if (v[0] > lat) break;                 // sorted by latency
+            if (v[1] <= money && (v[0] < lat || v[1] < money)) return true;
+        }
+        return false;
     }
 
     private static String cutKey(Graph g, Partial item, int placedUpTo) {

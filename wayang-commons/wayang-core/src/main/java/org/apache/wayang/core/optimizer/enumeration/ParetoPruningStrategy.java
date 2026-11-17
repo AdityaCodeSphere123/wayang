@@ -52,6 +52,9 @@ import java.util.stream.Collectors;
  * {@code (1 + ε)^(1/k) − 1}, where {@code k} is the number of top-level operators of the job (an upper bound on the
  * prunes along one plan), so the final front is within {@code 1 + ε} of the exact one (Trummer and Koch, SIGMOD'14).</p>
  *
+ * <p><b>Size cap.</b> With {@code objectives.max-front=N}, a group whose front has more than {@code N} plans is
+ * coarsened (larger ε for that group only) until it fits. The fastest and the cheapest plan are always kept.</p>
+ *
  * <p><b>Constraints.</b> Costs only grow when a plan is extended. A partial plan that already exceeds the budget or
  * the deadline can never become feasible, so it is dropped as long as its group still has a feasible plan
  * (if the group has none, the front is kept so the final pick can fall back to the least-violating plan).</p>
@@ -115,10 +118,11 @@ public class ParetoPruningStrategy implements PlanEnumerationPruningStrategy {
                 candidates = feasible;
             }
         }
-        final List<PlanImplementation> kept = ParetoFront.retain(
+        final List<PlanImplementation> kept = ParetoFront.retainBounded(
                 candidates,
                 plan -> plan.getVectorCostEstimate(true),
                 epsilon,
+                this.settings.getMaxFront(),
                 PlanImplementation.structuralComparator()
         );
         if (kept.isEmpty() && !candidates.isEmpty()) {

@@ -1,0 +1,663 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,longtable,array}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{microtype}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+\setlength{\LTcapwidth}{\textwidth}
+
+\title{Multi-objective (latency, money) optimizer for Apache Wayang:\\ test report}
+\date{17 November 2026}
+\author{Branch \texttt{multi-objective-cost}, commit \texttt{a9961c113} plus working-tree changes}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+%======================================================================
+\section{Summary}
+
+The optimizer keeps a Pareto set of partial plans over two objectives, latency and money, instead of one scalar
+cost, and picks one plan at the end (fastest within a budget by default). This report tests it in three settings.
+
+\begin{enumerate}
+\item \textbf{Real Wayang, Java + Apache Spark} (Scenarios A--C): eight workloads, including TPC-H Q1/Q3 on SF1
+data, WordCount on 754\,MB, k-means and SGD with loops, and Wayang's synthetic optimizer plans.
+\item \textbf{Simulator with a budget} (Scenario D): 19 plan shapes (chains, joins, small and random DAGs up to 25
+operators, 4--8 platforms). Five pruning methods are compared on the number of stored partial plans and on the plan
+returned to the user.
+\item \textbf{Scalability} (Scenario E): chains up to 200 operators, random DAGs up to 35 operators.
+\end{enumerate}
+
+\paragraph{Main results.}
+\begin{itemize}
+\item \textbf{Same answer as original Wayang when nothing is bounded.} With equal platform rates, all 8 workloads
+pick the identical plan (same execution operators). With different rates, our cheapest pick equals original Wayang
+(which minimises money) and our fastest pick equals original Wayang run with cost $=$ time, on all 7 workloads.
+Executing TPC-H Q3: 7.06\,s original vs.\ 7.14\,s ours, same plan, same 11{,}620 rows.
+\item \textbf{Under a budget, original Wayang fails.} It returned an over-budget plan in 19 of 19 graphs (76--89\%
+more money than allowed). Exact Pareto and ours returned the true best plan in 19 of 19.
+\item \textbf{Pruning.} Our cross-group pruning stores 1.3$\times$ (chains) to 47.9$\times$ (25-operator random DAGs)
+fewer partial plans than exact Pareto, with \emph{identical} results. On random DAGs with 20 and 25 operators it stores
+0.53$\times$ and 0.22$\times$ as many partial plans as original Wayang (which keeps one plan per group).
+\item \textbf{Capped variants} ($k=8$ plans per group) store up to 55$\times$ fewer plans than exact on long chains.
+The returned plan is on average 3.0\% (ours-$k8$) or 3.3\% (Pareto-$k8$) slower than the best (worst 9.5\% and
+13.4\%), and never over budget.
+\item \textbf{Limits.} Exact Pareto runs out of memory (8\,GB) at 30-operator random DAGs; with cross-group pruning
+the limit moves to about 35 operators. Cross-group pruning is so far implemented in the simulator only
+(Section~\ref{sec:limits}).
+\end{itemize}
+
+%======================================================================
+\section{System under test}
+
+\subsection{What the optimizer does}
+Each partial plan carries a cost vector $(c_1, c_2) =$ (latency in ms, money). For an element $e$ (operator,
+conversion operator, or loop body) on platform $p(e)$ with time interval $t_e$:
+\[
+c_1 = \sum_e s(t_e) + \sum_{p\in P}\mathit{init}_p,\qquad
+c_2 = \sum_e s\bigl(r_{p(e)}\, t_e\bigr) + \sum_{p\in P}\bigl(\mathit{fix}_p + r_p\,\mathit{init}_p\bigr),
+\]
+where $s$ is Wayang's interval squasher (geometric mean), $r_p$ = \texttt{wayang.<p>.costs.per-ms},
+$\mathit{fix}_p$ = \texttt{costs.fix}, $\mathit{init}_p$ = \texttt{wayang.<p>.init.ms}, and $P$ is the set of
+platforms the plan uses. Both axes are sums, so the cost of a combined plan is the sum of its parts. This is what
+makes pruning partial plans safe. With equal rates, $c_2$ is exactly Wayang's original scalar cost.
+
+After every concatenation, plans are grouped by (platforms used, operators with still-open connections), as in
+Wayang's original pruning. Each group keeps its Pareto front instead of one plan. Optional settings:
+\begin{itemize}
+\item a cap of $k$ plans per group, which coarsens a group's front when it is larger and always keeps the fastest
+and the cheapest plan;
+\item budget/deadline pruning: drop plans already over a bound when their group still has a plan within it.
+\end{itemize}
+At the end: the fastest plan with money $\le$ budget, or the plan with the smallest violation if none fits.
+
+\subsection{Configuration keys and values used}
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Key (\texttt{wayang.core.optimizer.\dots}) & Value & Meaning\\
+\midrule
+\texttt{pruning.strategies} & \texttt{ParetoPruningStrategy} & original: \texttt{LatentOperatorPruningStrategy}\\
+\texttt{cost.model} & \texttt{vector} & original: \texttt{default}\\
+\texttt{objectives.estimate} & \texttt{squash} & per-element geometric mean (Wayang's own)\\
+\texttt{objectives.epsilon} & 0 & exact Pareto per group\\
+\texttt{objectives.max-front} & 64 (simulator: 0 or 8) & cap per group\\
+\texttt{objectives.weight.latency / monetary} & 1 / 0 & fastest; (0,1) = cheapest\\
+\texttt{objectives.budget} & $\infty$ (Scenario D: see text) & money bound\\
+\texttt{objectives.prune.constraints} & true & drop partial plans over a bound\\
+\texttt{objectives.junctions} & \texttt{single} & one conversion path per boundary\\
+\texttt{enumeration.parallel-tasks} & false & costs add up (no max over branches)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Test environment}
+
+\begin{center}\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Machine & Apple M4 Pro, 12 cores (8 performance + 4 efficiency), 24\,GB RAM, macOS\\
+Java & OpenJDK 17.0.20 (Homebrew); Maven 3.9.16\\
+Wayang & 1.1.2-SNAPSHOT, branch \texttt{multi-objective-cost}; new \texttt{wayang-core} classes ahead of the assembly jars\\
+Spark & Apache Spark 3.4.4 (Hadoop 3.3.4), \texttt{spark.master = local[1]}\\
+Data & TPC-H SF1 \texttt{dbgen} files: customer 150{,}000 rows / 24\,MB; orders 1{,}500{,}000 / 170\,MB;\\
+& lineitem 6{,}001{,}215 / 754\,MB; \texttt{lineitem\_q1.csv} 946\,MB\\
+& k-means: 3{,}000{,}000 2-D points (46\,MB); SGD: 2{,}000{,}000 rows, 4 features (53\,MB)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Platforms and their parameters (real Wayang)}
+Two platforms were registered: \textbf{Java Streams} (single JVM, one thread per operator) and \textbf{Apache
+Spark}. Wayang estimates operator time from per-operator load profiles (CPU, disk, network) and the parameters below.
+Money is time multiplied by the platform rate, in abstract \emph{cost units}; these are not dollars.
+
+\begin{center}\small
+\begin{tabular}{@{}lll|ll@{}}
+\toprule
+Parameter & Java & Spark (A, C) & Spark (B) & Java (B)\\
+\midrule
+\texttt{cpu.mhz} & 2700 & 2700 & 2700 & 2700\\
+cores & 1 & $1\times2$ (machines $\times$ cores) & $16\times8 = 128$ & 1\\
+\texttt{init.ms} (start-up) & 0 & 4500 & 4500 & 0\\
+\texttt{hdfs.ms-per-mb} & 2.7 & 2.7 & 2.7 & 2.7\\
+\texttt{network.ms-per-mb} & -- & 8.6 & 8.6 & --\\
+\texttt{costs.per-ms} (rate) & 1 & 1 & 128 & 1\\
+\texttt{costs.fix} & 0 & 0 & 0 & 0\\
+\bottomrule
+\end{tabular}
+\end{center}
+Scenario B models a 128-core Spark cluster priced per core against single-core Java. Spark is then faster on large
+inputs but costs more per unit of work, which creates a real latency/money trade-off. These parameters are
+Wayang's defaults, not values measured on the test machine (see Section~\ref{sec:limits}).
+
+%======================================================================
+\section{Scenario A: real Wayang, equal rates, no budget}
+Optimizer only (\texttt{wayang.core.debug.skipexecution=true}). With equal rates, cost $=$ time, so original Wayang
+and our fastest pick optimise the same objective and should return the same plan.
+
+\begin{table}[h]\centering\small
+\caption{Scenario A: equal platform rates (Java and Spark at 1/ms), no budget. Picked plan of original Wayang vs.\ ours, compared by the sorted list of all execution operators (hash).}\label{tab:parityA}
+\resizebox{\textwidth}{!}{\begin{tabular}{@{}lrlll|lc@{}}
+\toprule
+Workload & Ops & Platforms & Estimated time (orig.) & Hash orig./ours & Ours, \texttt{estimate=mean} & Same\\
+\midrule
+TPC-H Q3 (SF1 files) & 18 & Java & 5.6--66.4\,s & \texttt{c4403302}/\texttt{c4403302} & Java+Spark, 22 ops (differs) & yes\\
+TPC-H Q1 (SF1) & 7 & Java & 2.9--21.6\,s & \texttt{448c5da3}/\texttt{448c5da3} & Java, 7 ops & yes\\
+WordCount (754 MB) & 6 & Java & 301.8--161{,}343.1\,s & \texttt{7ff04b7a}/\texttt{7ff04b7a} & Java+Spark, 7 ops (differs) & yes\\
+k-means (3M points, loop) & 16 & Java & 13.0--49.0\,s & \texttt{5d951584}/\texttt{5d951584} & Java, 16 ops & yes\\
+SGD (2M rows, loop) & 14 & Java & 1.1--2.6\,s & \texttt{a33fc926}/\texttt{a33fc926} & Java, 14 ops & yes\\
+pipeline-12 & 12 & Java & 0.0--0.0\,s & \texttt{1eeee835}/\texttt{1eeee835} & Java, 12 ops & yes\\
+fan-out-8 & 10 & Java & 0.0--0.0\,s & \texttt{b25f45b6}/\texttt{b25f45b6} & Java, 10 ops & yes\\
+tree-5 & 32 & Java & 0.1--0.1\,s & \texttt{f49a5c8c}/\texttt{f49a5c8c} & Java, 32 ops & yes\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\noindent
+All 8 workloads give the identical plan. The column \texttt{estimate=mean} shows that turning intervals into numbers
+with the midpoint instead of Wayang's geometric mean changes the plan for Q3 and WordCount; this is why
+\texttt{squash} is the default. With Wayang's default Spark parameters (one machine with two cores, 4.5\,s start-up),
+every workload picks Java only, even on the SF1 inputs; Scenario B models a larger Spark cluster.
+
+%======================================================================
+\section{Scenario B: real Wayang with a latency/money trade-off}
+Same workloads (pipeline-30 and fan-out-10 instead of 12 and 8; Q1 not included), Spark as a $16\times8$-core cluster at
+128/ms. Original Wayang minimises its scalar cost, so we compare our \emph{cheapest} pick with original Wayang at
+these rates, and our \emph{fastest} pick with original Wayang at equal rates (cost $=$ time). For synthetic plans,
+Spark start-up was set to 0 (otherwise Java wins every plan on tiny inputs).
+
+\begin{table}[h]\centering\small
+\caption{Scenario B: real trade-off (Java 1 core at 1/ms, Spark $16\times8$ cores at 128/ms), no budget. Our fastest pick vs.\ original Wayang with cost $=$ time (equal rates), and our cheapest pick vs.\ original Wayang with cost $=$ money.}\label{tab:parityB}
+\begin{tabular}{@{}lr|ll|ll|rr@{}}
+\toprule
+& & \multicolumn{2}{c|}{Fastest: orig.(time) / ours} & \multicolumn{2}{c|}{Cheapest: orig.(money) / ours} & \multicolumn{2}{c}{Enumerate (s)}\\
+Workload & Front & Platforms & Same & Platforms & Same & orig. & ours\\
+\midrule
+TPC-H Q3 (SF1 files) & 50 & Spark+Java & yes & Java & yes & 0.095 & 0.372\\
+WordCount (754 MB) & 15 & Spark+Java & yes & Java & yes & 0.047 & 0.051\\
+k-means (3M points, loop) & 13 & Spark+Java & yes & Java & yes & 0.093 & 0.119\\
+SGD (2M rows, loop) & 1 & Java & yes & Java & yes & 0.146 & 0.162\\
+pipeline-30 & 1 & Java & yes & Java & yes & 0.111 & 0.110\\
+fan-out-10 & 1 & Java & yes & Java & yes & 18.053 & 18.204\\
+tree-5 & 1 & Java & yes & Java & yes & 0.359 & 0.336\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]\centering\small
+\caption{Scenario B: the extremes of our final Pareto front (estimated latency in ms, money in cost units $=$ rate $\times$ ms).}\label{tab:frontsB}
+\begin{tabular}{@{}lr|rrl|rrl@{}}
+\toprule
+Workload & Front & \multicolumn{3}{c|}{Fastest plan} & \multicolumn{3}{c}{Cheapest plan}\\
+& & Latency & Money & Platforms & Latency & Money & Platforms\\
+\midrule
+TPC-H Q3 (SF1 files) & 50 & 4{,}928 & 629{,}679 & Spark+Java & 15{,}627 & 15{,}627 & Java\\
+WordCount (754 MB) & 15 & 130{,}448 & 16{,}616{,}112 & Spark+Java & 6{,}560{,}444 & 6{,}560{,}444 & Java\\
+k-means (3M points, loop) & 13 & 5{,}709 & 726{,}755 & Spark+Java & 23{,}718 & 23{,}718 & Java\\
+SGD (2M rows, loop) & 1 & 1{,}485 & 1{,}485 & Java & 1{,}485 & 1{,}485 & Java\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Every comparison returns the identical plan. On TPC-H Q3 the front has 50 plans: the fastest uses Spark and Java,
+the cheapest is Java only. Enumeration time grows from 0.095\,s to 0.372\,s on Q3 (the largest front) and is
+unchanged where the front has one plan.
+
+%======================================================================
+\section{Scenario C: executed TPC-H Q3}
+\begin{table}[h]\centering\small
+\caption{Scenario C: TPC-H Q3 on SF1, executed (Spark \texttt{local[1]}, equal rates).}\label{tab:exec}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Optimizer & Picked plan & Execution (s) & Result rows & Output vs.\ original\\
+\midrule
+Original Wayang & Java & 7.06 & 11{,}620 & --\\
+Ours (default) & Java & 7.14 & 11{,}620 & identical\\
+Ours, \texttt{estimate=mean} & Spark+Java & 14.56 & 11{,}620 & same rows, different order\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+With the default estimator, the executed plan, runtime and result equal original Wayang's. The midpoint estimator
+picks a Spark+Java plan that is 2$\times$ slower on this machine. Q3 here ends in \texttt{reduceByKey(\dots).collect()}
+without sorting, so the row order depends on the engine.
+
+%======================================================================
+\section{Scenario D: simulator, five pruning methods under a budget}\label{sec:sim}
+
+\subsection{Simulator}
+\texttt{PlanDagSimulator} (test code) runs the same dynamic programme as the optimizer on a DAG of operators. It
+visits operators in topological order and extends every kept partial plan by every platform. Plans are grouped by
+the platforms of the operators that still have an unvisited successor, which is the analogue of Wayang's (platforms,
+open operators) grouping. Costs are additive:
+\begin{itemize}
+\item \textbf{Operator cost} on platform $p\in\{0,\dots,P-1\}$: latency $= \mathit{base}_L \cdot (0.45 + 1.3\,p/(P-1))$,
+money $= \mathit{base}_M \cdot (1.75 - 1.35\,p/(P-1))$. Platform 0 is the fastest and most expensive (cluster-like);
+platform $P-1$ is the slowest and cheapest (single-node-like). With $P=4$ the factors are latency
+0.45/0.88/1.32/1.75 and money 1.75/1.30/0.85/0.40.
+\item \textbf{Base costs} (latency, money): scan (20, 8), filter (16, 6), map (24, 10), join (80, 22),
+aggregate (36, 12), sink (12, 5).
+\item \textbf{Conversion} between platforms $a,b$ on every edge: latency $5|a-b|$, money $4|a-b|$ (0 on the same
+platform).
+\item \textbf{Random DAGs}: a random spanning tree plus 1 to $n/2$ extra forward edges. Each (operator, platform)
+latency and money is multiplied independently by a uniform factor in $[0.6, 1.4]$ (fixed seeds 1--3).
+\end{itemize}
+These platforms are abstract cost profiles, not calibrated Java or Spark. They give every operator a genuine
+latency/money trade-off, which real small inputs do not (Scenario A).
+
+\subsection{Methods}
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Method & Kept per group & Budget used during search\\
+\midrule
+Original & 1 plan: lowest latency (Wayang's scalar pruning) & no (Wayang has no budget)\\
+Pareto $k{=}8$ & Pareto front, at most 8 (+ fastest and cheapest) & yes\\
+Exact Pareto & full Pareto front & yes\\
+\textbf{Ours} & full front, plus exact cross-group pruning & yes\\
+Ours $k{=}8$ & ours with the cap of 8 & yes\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Cross-group pruning.} Two partial plans in different groups differ in the platforms of some open
+operators. For any completion, $p$'s conversions out of an open operator cost at most $\mathrm{conv}(a\to b)$ less
+than $q$'s, where $a, b$ are the two platforms (triangle inequality). So if
+$c(q) + \sum_{\text{open edges}} \mathrm{conv}(a_j \to b_j)$ dominates $c(p)$, every completion of $q$ dominates
+the same completion of $p$, and $p$ is dropped. The best ``switched-in'' vector per group is computed one open operator
+at a time (a separable transform over 2-D fronts), not over all pairs of groups. \texttt{CrossGroupPruningTest}
+checks that the final front equals brute force on 25 random DAGs and equals exact Pareto on 18 more graphs.
+
+\paragraph{Budget.} For every graph, budget $=$ cheapest money $+\,0.4\times$(most expensive $-$ cheapest money)
+on the true Pareto front, so the fastest plan is never affordable. Budget pruning (as in \texttt{ParetoPruningStrategy}):
+within a group, plans above the budget are dropped when the group still has a plan within it.
+
+\paragraph{Graphs.} Two chains (30 operators $\times$ 4 platforms, 60 $\times$ 8); a triple diamond (11 ops), a bushy plan (8),
+a branching plan (10); left-deep joins over 8, 16 and 32 tables (scan and join interleaved, as Wayang combines a
+join tree; 16, 32 and 64 operators); random DAGs with 12, 16, 20 operators (seeds 1--3) and 25 operators
+(seeds 1, 2). Four platforms unless stated.
+
+\paragraph{Counters.} \emph{Generated}: partial plans created before pruning, summed over all steps. \emph{Stored}:
+partial plans kept after pruning, summed over all steps (total memory traffic). \emph{Peak}: the most partial plans
+alive after one step (peak memory). \emph{Final}: plans reported at the end. \emph{Brute force}: $P^{n}$ complete
+plans.
+
+\subsection{How much each method stores}
+Bold: fewest among the four multi-objective methods.
+
+\begin{longtable}{@{}lrr|rrrrr@{}}
+\caption{Stored partial plans (sum over all steps).}\label{tab:stored}\\
+\toprule
+Graph & Ops & Brute force & Original & Pareto $k{=}8$ & Exact Pareto & \textbf{Ours} & Ours $k{=}8$\\
+\midrule\endhead
+chain-30x4 & 30 & $1.2\times10^{18}$ & 117 & 938 & 7{,}275 & 6{,}138 & \textbf{836}\\
+chain-60x8 & 60 & $1.5\times10^{54}$ & 473 & 3{,}924 & 197{,}907 & 137{,}155 & \textbf{3{,}586}\\
+3-diamond & 11 & $4.2\times10^{6}$ & 113 & 709 & 1{,}260 & 684 & \textbf{472}\\
+bushy & 8 & 65{,}536 & 425 & 692 & 700 & 558 & \textbf{550}\\
+branching & 10 & $1.0\times10^{6}$ & 265 & 831 & 1{,}206 & 684 & \textbf{524}\\
+join8 & 16 & $4.3\times10^{9}$ & 145 & 988 & 1{,}808 & 1{,}288 & \textbf{689}\\
+join16 & 32 & $1.8\times10^{19}$ & 305 & 2{,}293 & 10{,}408 & 7{,}519 & \textbf{1{,}744}\\
+join32 & 64 & $3.4\times10^{38}$ & 625 & 5{,}117 & 49{,}785 & 39{,}060 & \textbf{4{,}237}\\
+dag12-1 & 12 & $1.7\times10^{7}$ & 1{,}257 & 6{,}485 & 6{,}996 & 2{,}003 & \textbf{1{,}948}\\
+dag12-2 & 12 & $1.7\times10^{7}$ & 477 & 2{,}259 & 3{,}011 & 935 & \textbf{783}\\
+dag12-3 & 12 & $1.7\times10^{7}$ & 957 & 2{,}897 & 2{,}966 & 1{,}335 & \textbf{1{,}293}\\
+dag16-1 & 16 & $4.3\times10^{9}$ & 3{,}385 & 22{,}518 & 32{,}396 & 3{,}031 & \textbf{2{,}289}\\
+dag16-2 & 16 & $4.3\times10^{9}$ & 2{,}977 & 18{,}787 & 25{,}410 & 2{,}454 & \textbf{1{,}845}\\
+dag16-3 & 16 & $4.3\times10^{9}$ & 1{,}849 & 11{,}917 & 22{,}788 & 4{,}232 & \textbf{3{,}096}\\
+dag20-1 & 20 & $1.1\times10^{12}$ & 26{,}489 & 168{,}249 & 344{,}604 & 20{,}702 & \textbf{17{,}627}\\
+dag20-2 & 20 & $1.1\times10^{12}$ & 7{,}721 & 54{,}521 & 129{,}151 & 13{,}670 & \textbf{10{,}467}\\
+dag20-3 & 20 & $1.1\times10^{12}$ & 814{,}565 & 3{,}863{,}258 & 4{,}858{,}892 & 85{,}454 & \textbf{82{,}635}\\
+dag25-1 & 25 & $1.1\times10^{15}$ & 1{,}248{,}937 & 6{,}929{,}707 & 8{,}615{,}574 & 218{,}231 & \textbf{207{,}585}\\
+dag25-2 & 25 & $1.1\times10^{15}$ & 390{,}121 & 2{,}626{,}749 & 6{,}068{,}410 & 104{,}386 & \textbf{88{,}284}\\
+\bottomrule
+\end{longtable}
+
+\begin{longtable}{@{}lrr|rrrrr@{}}
+\caption{Peak number of partial plans alive at one time.}\label{tab:peak}\\
+\toprule
+Graph & Ops & Brute force & Original & Pareto $k{=}8$ & Exact Pareto & \textbf{Ours} & Ours $k{=}8$\\
+\midrule\endhead
+chain-30x4 & 30 & $1.2\times10^{18}$ & 4 & 40 & 398 & 361 & \textbf{37}\\
+chain-60x8 & 60 & $1.5\times10^{54}$ & 8 & 78 & 5{,}533 & 3{,}962 & \textbf{74}\\
+3-diamond & 11 & $4.2\times10^{6}$ & 16 & 147 & 277 & 174 & \textbf{113}\\
+bushy & 8 & 65{,}536 & 256 & \textbf{256} & \textbf{256} & \textbf{256} & \textbf{256}\\
+branching & 10 & $1.0\times10^{6}$ & 64 & 256 & 287 & 147 & \textbf{115}\\
+join8 & 16 & $4.3\times10^{9}$ & 16 & 148 & 311 & 231 & \textbf{103}\\
+join16 & 32 & $1.8\times10^{19}$ & 16 & 148 & 821 & 592 & \textbf{115}\\
+join32 & 64 & $3.4\times10^{38}$ & 16 & 152 & 1{,}900 & 1{,}603 & \textbf{140}\\
+dag12-1 & 12 & $1.7\times10^{7}$ & 256 & 1{,}606 & 1{,}900 & \textbf{462} & \textbf{462}\\
+dag12-2 & 12 & $1.7\times10^{7}$ & 256 & 1{,}134 & 1{,}529 & 228 & \textbf{188}\\
+dag12-3 & 12 & $1.7\times10^{7}$ & 256 & 950 & 950 & \textbf{519} & \textbf{519}\\
+dag16-1 & 16 & $4.3\times10^{9}$ & 1{,}024 & 6{,}947 & 10{,}186 & 449 & \textbf{409}\\
+dag16-2 & 16 & $4.3\times10^{9}$ & 1{,}024 & 6{,}603 & 7{,}587 & 502 & \textbf{412}\\
+dag16-3 & 16 & $4.3\times10^{9}$ & 256 & 2{,}250 & 4{,}732 & 671 & \textbf{667}\\
+dag20-1 & 20 & $1.1\times10^{12}$ & 4{,}096 & 34{,}036 & 85{,}898 & 3{,}386 & \textbf{2{,}960}\\
+dag20-2 & 20 & $1.1\times10^{12}$ & 1{,}024 & 9{,}109 & 28{,}675 & 2{,}252 & \textbf{2{,}104}\\
+dag20-3 & 20 & $1.1\times10^{12}$ & 262{,}144 & 1{,}177{,}839 & 1{,}207{,}484 & 17{,}872 & \textbf{17{,}860}\\
+dag25-1 & 25 & $1.1\times10^{15}$ & 262{,}144 & 2{,}113{,}429 & 2{,}507{,}004 & 49{,}753 & \textbf{49{,}742}\\
+dag25-2 & 25 & $1.1\times10^{15}$ & 65{,}536 & 560{,}110 & 1{,}893{,}544 & 16{,}263 & \textbf{15{,}958}\\
+\bottomrule
+\end{longtable}
+
+\begin{longtable}{@{}lrr|rrrrr@{}}
+\caption{Partial plans generated before pruning (sum over all steps).}\label{tab:generated}\\
+\toprule
+Graph & Ops & Brute force & Original & Pareto $k{=}8$ & Exact Pareto & \textbf{Ours} & Ours $k{=}8$\\
+\midrule\endhead
+chain-30x4 & 30 & $1.2\times10^{18}$ & 468 & 3{,}716 & 28{,}752 & 24{,}204 & \textbf{3{,}308}\\
+chain-60x8 & 60 & $1.5\times10^{54}$ & 3{,}784 & 31{,}344 & 1{,}580{,}984 & 1{,}094{,}968 & \textbf{28{,}640}\\
+3-diamond & 11 & $4.2\times10^{6}$ & 452 & 2{,}808 & 4{,}940 & 2{,}636 & \textbf{1{,}864}\\
+bushy & 8 & 65{,}536 & 1{,}700 & 2{,}740 & 2{,}740 & \textbf{2{,}172} & \textbf{2{,}172}\\
+branching & 10 & $1.0\times10^{6}$ & 1{,}060 & 3{,}288 & 4{,}740 & 2{,}652 & \textbf{2{,}060}\\
+join8 & 16 & $4.3\times10^{9}$ & 580 & 3{,}924 & 7{,}096 & 5{,}016 & \textbf{2{,}728}\\
+join16 & 32 & $1.8\times10^{19}$ & 1{,}220 & 9{,}144 & 41{,}296 & 29{,}740 & \textbf{6{,}944}\\
+join32 & 64 & $3.4\times10^{38}$ & 2{,}500 & 20{,}432 & 198{,}404 & 155{,}504 & \textbf{16{,}912}\\
+dag12-1 & 12 & $1.7\times10^{7}$ & 5{,}028 & 25{,}912 & 27{,}928 & 7{,}956 & \textbf{7{,}764}\\
+dag12-2 & 12 & $1.7\times10^{7}$ & 1{,}908 & 9{,}012 & 11{,}972 & 3{,}668 & \textbf{3{,}096}\\
+dag12-3 & 12 & $1.7\times10^{7}$ & 3{,}828 & 11{,}564 & 11{,}796 & 5{,}272 & \textbf{5{,}148}\\
+dag16-1 & 16 & $4.3\times10^{9}$ & 13{,}540 & 90{,}044 & 129{,}348 & 11{,}888 & \textbf{9{,}128}\\
+dag16-2 & 16 & $4.3\times10^{9}$ & 11{,}908 & 75{,}116 & 101{,}452 & 9{,}628 & \textbf{7{,}344}\\
+dag16-3 & 16 & $4.3\times10^{9}$ & 7{,}396 & 47{,}644 & 91{,}020 & 16{,}796 & \textbf{12{,}356}\\
+dag20-1 & 20 & $1.1\times10^{12}$ & 105{,}956 & 672{,}960 & 1{,}378{,}248 & 82{,}640 & \textbf{70{,}472}\\
+dag20-2 & 20 & $1.1\times10^{12}$ & 30{,}884 & 218{,}052 & 516{,}380 & 54{,}456 & \textbf{41{,}844}\\
+dag20-3 & 20 & $1.1\times10^{12}$ & 3{,}258{,}260 & 15{,}453{,}004 & 19{,}435{,}392 & 341{,}640 & \textbf{330{,}512}\\
+dag25-1 & 25 & $1.1\times10^{15}$ & 4{,}995{,}748 & 27{,}718{,}808 & 34{,}462{,}012 & 872{,}640 & \textbf{830{,}304}\\
+dag25-2 & 25 & $1.1\times10^{15}$ & 1{,}560{,}484 & 10{,}506{,}972 & 24{,}273{,}236 & 417{,}140 & \textbf{353{,}112}\\
+\bottomrule
+\end{longtable}
+
+\begin{longtable}{@{}lrr|rrrrr@{}}
+\caption{Plans reported at the end (the final front; original Wayang reports one plan).}\label{tab:final}\\
+\toprule
+Graph & Ops & Brute force & Original & Pareto $k{=}8$ & Exact Pareto & \textbf{Ours} & Ours $k{=}8$\\
+\midrule\endhead
+chain-30x4 & 30 & $1.2\times10^{18}$ & 1 & \textbf{10} & 88 & 88 & \textbf{10}\\
+chain-60x8 & 60 & $1.5\times10^{54}$ & 1 & \textbf{7} & 285 & 285 & \textbf{7}\\
+3-diamond & 11 & $4.2\times10^{6}$ & 1 & 8 & 26 & 26 & \textbf{7}\\
+bushy & 8 & 65{,}536 & 1 & \textbf{8} & 16 & 16 & \textbf{8}\\
+branching & 10 & $1.0\times10^{6}$ & 1 & \textbf{10} & 22 & 22 & \textbf{10}\\
+join8 & 16 & $4.3\times10^{9}$ & 1 & \textbf{8} & 35 & 35 & \textbf{8}\\
+join16 & 32 & $1.8\times10^{19}$ & 1 & \textbf{8} & 85 & 85 & 9\\
+join32 & 64 & $3.4\times10^{38}$ & 1 & \textbf{10} & 185 & 185 & \textbf{10}\\
+dag12-1 & 12 & $1.7\times10^{7}$ & 1 & \textbf{8} & 15 & 15 & \textbf{8}\\
+dag12-2 & 12 & $1.7\times10^{7}$ & 1 & \textbf{7} & 19 & 19 & 10\\
+dag12-3 & 12 & $1.7\times10^{7}$ & 1 & \textbf{7} & 18 & 18 & \textbf{7}\\
+dag16-1 & 16 & $4.3\times10^{9}$ & 1 & \textbf{8} & 60 & 60 & \textbf{8}\\
+dag16-2 & 16 & $4.3\times10^{9}$ & 1 & \textbf{9} & 48 & 48 & 10\\
+dag16-3 & 16 & $4.3\times10^{9}$ & 1 & \textbf{7} & 34 & 34 & 8\\
+dag20-1 & 20 & $1.1\times10^{12}$ & 1 & \textbf{10} & 43 & 43 & \textbf{10}\\
+dag20-2 & 20 & $1.1\times10^{12}$ & 1 & 9 & 57 & 57 & \textbf{7}\\
+dag20-3 & 20 & $1.1\times10^{12}$ & 1 & \textbf{8} & 45 & 45 & \textbf{8}\\
+dag25-1 & 25 & $1.1\times10^{15}$ & 1 & \textbf{6} & 72 & 72 & 10\\
+dag25-2 & 25 & $1.1\times10^{15}$ & 1 & \textbf{7} & 102 & 102 & \textbf{7}\\
+\bottomrule
+\end{longtable}
+
+\begin{longtable}{@{}lr|rrr|rr@{}}
+\caption{Pruning factors per graph (stored partial plans). Values $>1$ mean the method in the denominator stores fewer plans.}\label{tab:ratios}\\
+\toprule
+Graph & Ops & exact/ours & exact/Pareto-$k8$ & exact/ours-$k8$ & ours/original & brute/ours\\
+\midrule\endhead
+chain-30x4 & 30 & 1.2$\times$ & 7.8$\times$ & 8.7$\times$ & 52.46$\times$ & $1.9\times10^{14}$\\
+chain-60x8 & 60 & 1.4$\times$ & 50.4$\times$ & 55.2$\times$ & 289.97$\times$ & $1.1\times10^{49}$\\
+3-diamond & 11 & 1.8$\times$ & 1.8$\times$ & 2.7$\times$ & 6.05$\times$ & 6{,}132\\
+bushy & 8 & 1.3$\times$ & 1.0$\times$ & 1.3$\times$ & 1.31$\times$ & 117\\
+branching & 10 & 1.8$\times$ & 1.5$\times$ & 2.3$\times$ & 2.58$\times$ & 1{,}533\\
+join8 & 16 & 1.4$\times$ & 1.8$\times$ & 2.6$\times$ & 8.88$\times$ & $3.3\times10^{6}$\\
+join16 & 32 & 1.4$\times$ & 4.5$\times$ & 6.0$\times$ & 24.65$\times$ & $2.5\times10^{15}$\\
+join32 & 64 & 1.3$\times$ & 9.7$\times$ & 11.8$\times$ & 62.50$\times$ & $8.7\times10^{33}$\\
+dag12-1 & 12 & 3.5$\times$ & 1.1$\times$ & 3.6$\times$ & 1.59$\times$ & 8{,}376\\
+dag12-2 & 12 & 3.2$\times$ & 1.3$\times$ & 3.8$\times$ & 1.96$\times$ & 17{,}944\\
+dag12-3 & 12 & 2.2$\times$ & 1.0$\times$ & 2.3$\times$ & 1.39$\times$ & 12{,}567\\
+dag16-1 & 16 & 10.7$\times$ & 1.4$\times$ & 14.2$\times$ & 0.90$\times$ & $1.4\times10^{6}$\\
+dag16-2 & 16 & 10.4$\times$ & 1.4$\times$ & 13.8$\times$ & 0.82$\times$ & $1.8\times10^{6}$\\
+dag16-3 & 16 & 5.4$\times$ & 1.9$\times$ & 7.4$\times$ & 2.29$\times$ & $1.0\times10^{6}$\\
+dag20-1 & 20 & 16.6$\times$ & 2.0$\times$ & 19.5$\times$ & 0.78$\times$ & $5.3\times10^{7}$\\
+dag20-2 & 20 & 9.4$\times$ & 2.4$\times$ & 12.3$\times$ & 1.77$\times$ & $8.0\times10^{7}$\\
+dag20-3 & 20 & 56.9$\times$ & 1.3$\times$ & 58.8$\times$ & 0.10$\times$ & $1.3\times10^{7}$\\
+dag25-1 & 25 & 39.5$\times$ & 1.2$\times$ & 41.5$\times$ & 0.17$\times$ & $5.2\times10^{9}$\\
+dag25-2 & 25 & 58.1$\times$ & 2.3$\times$ & 68.7$\times$ & 0.27$\times$ & $1.1\times10^{10}$\\
+\bottomrule
+\end{longtable}
+
+\begin{table}[h]\centering\small
+\caption{Geometric mean of the pruning factors per family of graphs.}\label{tab:families}
+\begin{tabular}{@{}lr|rrr|rr@{}}
+\toprule
+Family & Graphs & exact/ours & exact/Pareto-$k8$ & exact/ours-$k8$ & exact/original & ours/original\\
+\midrule
+chains & 2 & 1.3$\times$ & 19.8$\times$ & 21.9$\times$ & 161.3$\times$ & 123.34$\times$\\
+small DAGs & 3 & 1.6$\times$ & 1.4$\times$ & 2.0$\times$ & 4.4$\times$ & 2.74$\times$\\
+joins & 3 & 1.4$\times$ & 4.3$\times$ & 5.7$\times$ & 32.4$\times$ & 23.92$\times$\\
+dag12 & 3 & 2.9$\times$ & 1.1$\times$ & 3.2$\times$ & 4.8$\times$ & 1.63$\times$\\
+dag16 & 3 & 8.4$\times$ & 1.5$\times$ & 11.3$\times$ & 10.0$\times$ & 1.19$\times$\\
+dag20 & 3 & 20.8$\times$ & 1.8$\times$ & 24.2$\times$ & 10.9$\times$ & 0.53$\times$\\
+dag25 & 2 & 47.9$\times$ & 1.7$\times$ & 53.4$\times$ & 10.4$\times$ & 0.22$\times$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Reading the factors.} The gain of cross-group pruning over exact Pareto is not a constant; it grows with
+branching. Chains and interleaved joins have one or two open operators at a time, so there are few groups and little
+to prune across groups (1.3--1.4$\times$). Random DAGs keep many operators open, the number of groups grows as
+$P^{\#\text{open}}$, and the factor rises from 2.9$\times$ (12 operators) to 47.9$\times$ (25 operators). On chains and
+joins, ours stores 24--123$\times$ more than original Wayang. This is the cost of the front itself: there are 35--285
+genuine trade-off plans and original Wayang keeps one. The cap of 8 removes most of that (exact/ours-$k8$ $=$
+21.9$\times$ on chains).
+
+\subsection{What is returned to the user}
+{\footnotesize\setlength{\tabcolsep}{3pt}
+\begin{longtable}{@{}lr|r|rrrrr@{}}
+\caption{Plan returned to the user: latency / money of the pick. ``True best'' is the fastest plan with money $\le$ budget (exact search). Red = over budget.}\label{tab:picks}\\
+\toprule
+Graph & Budget & True best & Original & Pareto $k{=}8$ & Exact Pareto & \textbf{Ours} & Ours $k{=}8$\\
+\midrule\endhead
+chain-30x4 & 341.2 & 1{,}408.7/338.6 & \textcolor{red}{505.8/635.2} & 1{,}466.8/339.4 & \textbf{1{,}408.7/338.6} & \textbf{1{,}408.7/338.6} & 1{,}509.7/334.8\\
+chain-60x8 & 685.3 & 2{,}792.7/684.4 & \textcolor{red}{1{,}015.2/1{,}275.8} & 3{,}067.1/630.7 & \textbf{2{,}792.7/684.4} & \textbf{2{,}792.7/684.4} & 3{,}058.9/632.6\\
+3-diamond & 119.4 & 515.9/114.2 & \textcolor{red}{176.4/222.2} & \textbf{515.9/114.2} & \textbf{515.9/114.2} & \textbf{515.9/114.2} & \textbf{515.9/114.2}\\
+bushy & 96.8 & 433.5/95.2 & \textcolor{red}{149.4/180.2} & \textbf{433.5/95.2} & \textbf{433.5/95.2} & \textbf{433.5/95.2} & \textbf{433.5/95.2}\\
+branching & 104.3 & 433.5/102.0 & \textcolor{red}{149.4/194.2} & 437.1/94.3 & \textbf{433.5/102.0} & \textbf{433.5/102.0} & 437.1/94.3\\
+join8 & 209.6 & 920.3/209.3 & \textcolor{red}{329.4/390.2} & 973.6/203.8 & \textbf{920.3/209.3} & \textbf{920.3/209.3} & 973.6/203.8\\
+join16 & 435.2 & 1{,}926.6/434.4 & \textcolor{red}{689.4/810.2} & 1{,}987.1/419.9 & \textbf{1{,}926.6/434.4} & \textbf{1{,}926.6/434.4} & 1{,}953.9/435.2\\
+join32 & 886.4 & 3{,}899.8/884.2 & \textcolor{red}{1{,}409.4/1{,}650.2} & 3{,}940.8/885.5 & \textbf{3{,}899.8/884.2} & \textbf{3{,}899.8/884.2} & 4{,}040.3/883.4\\
+dag12-1 & 115.8 & 468.6/115.0 & \textcolor{red}{148.6/210.4} & \textbf{468.6/115.0} & \textbf{468.6/115.0} & \textbf{468.6/115.0} & \textbf{468.6/115.0}\\
+dag12-2 & 108.6 & 504.7/106.7 & \textcolor{red}{138.6/191.3} & 514.0/106.9 & \textbf{504.7/106.7} & \textbf{504.7/106.7} & 510.1/107.6\\
+dag12-3 & 113.5 & 468.3/109.3 & \textcolor{red}{174.4/207.1} & \textbf{468.3/109.3} & \textbf{468.3/109.3} & \textbf{468.3/109.3} & \textbf{468.3/109.3}\\
+dag16-1 & 167.5 & 613.4/164.9 & \textcolor{red}{243.1/297.7} & 628.9/157.9 & \textbf{613.4/164.9} & \textbf{613.4/164.9} & 625.6/164.5\\
+dag16-2 & 169.8 & 587.3/168.3 & \textcolor{red}{241.0/312.1} & \textbf{587.3/168.3} & \textbf{587.3/168.3} & \textbf{587.3/168.3} & 637.4/164.0\\
+dag16-3 & 165.5 & 641.5/163.7 & \textcolor{red}{220.7/308.4} & \textbf{641.5/163.7} & \textbf{641.5/163.7} & \textbf{641.5/163.7} & \textbf{641.5/163.7}\\
+dag20-1 & 230.7 & 748.6/224.5 & \textcolor{red}{356.0/431.0} & 783.0/228.5 & \textbf{748.6/224.5} & \textbf{748.6/224.5} & 783.0/228.5\\
+dag20-2 & 214.8 & 748.7/210.2 & \textcolor{red}{312.7/398.8} & 782.4/213.5 & \textbf{748.7/210.2} & \textbf{748.7/210.2} & 777.5/214.6\\
+dag20-3 & 207.4 & 873.5/207.2 & \textcolor{red}{292.4/390.6} & 882.0/205.9 & \textbf{873.5/207.2} & \textbf{873.5/207.2} & \textbf{873.5/207.2}\\
+dag25-1 & 301.1 & 884.8/300.9 & \textcolor{red}{400.6/570.5} & 980.4/278.2 & \textbf{884.8/300.9} & \textbf{884.8/300.9} & 907.5/297.4\\
+dag25-2 & 290.5 & 995.3/287.7 & \textcolor{red}{409.3/524.9} & 1{,}128.3/281.2 & \textbf{995.3/287.7} & \textbf{995.3/287.7} & 1{,}056.4/276.2\\
+\bottomrule
+\end{longtable}}
+
+\begin{table}[h]\centering\small
+\caption{Quality of the returned plan over all 19 graphs (latency of pick $\div$ latency of true best within budget).}\label{tab:gap}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Method & Within budget & True best found & Mean gap & Worst gap & Over budget by\\
+\midrule
+Original & 0/19 & 0/19 & -- & -- & 76--89\% more money\\
+Pareto $k{=}8$ & 19/19 & 6/19 & +3.33\% & +13.4\% & --\\
+Exact Pareto & 19/19 & 19/19 & +0.00\% & +0.0\% & --\\
+\textbf{Ours} & 19/19 & 19/19 & +0.00\% & +0.0\% & --\\
+Ours $k{=}8$ & 19/19 & 6/19 & +3.00\% & +9.5\% & --\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Exact Pareto and ours return the same plan, which is the true best within the budget, in every graph; the assertion
+in \texttt{PruningComparisonReportTest} checks this. Original Wayang always returns the fastest plan, which is over budget.
+The capped variants are always within budget and lose on average about 3\% latency.
+
+\subsection{Example: final front of the 20-operator DAG, seed 3}
+Budget $= 207.4$. The exact and our final fronts are identical (45 plans each). Plan strings give the platform (0--3) of each of the 20 operators.
+\begin{center}\small
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Method & Plans & Latency & Money & Plan (platform per operator)\\
+\midrule
+Original & 1 & \textcolor{red}{292.4} & \textcolor{red}{390.6} & \texttt{00000000000000000000} $\leftarrow$ picked\\
+\midrule
+Pareto $k{=}8$ & 8 & {882.0} & {205.9} & \texttt{32333322322022222230} $\leftarrow$ picked\\
+ &  & {915.9} & {178.5} & \texttt{32333222322223222232}\\
+ &  & {923.7} & {178.3} & \texttt{33333322323223222231}\\
+ &  & {968.8} & {155.3} & \texttt{33333332323223223233}\\
+ &  & {1{,}029.9} & {131.1} & \texttt{33333322333333222333}\\
+ &  & {1{,}075.9} & {121.8} & \texttt{33333332333233333333}\\
+ &  & {1{,}114.6} & {107.1} & \texttt{33333332333333332333}\\
+ &  & {1{,}206.2} & {85.3} & \texttt{33333333333333333333}\\
+\midrule
+\textbf{Ours} & 45 & {873.5} & {207.2} & \texttt{22221222122223222222} $\leftarrow$ picked\\
+ &  & {874.3} & {207.1} & \texttt{32333322322223202232}\\
+ &  & {875.2} & {204.5} & \texttt{33333322323123202232}\\
+ &  & {875.6} & {196.2} & \texttt{22233322322121222231}\\
+ &  & \multicolumn{3}{c}{\dots}\\
+ &  & {1{,}146.4} & {99.2} & \texttt{33333332333333333333}\\
+ &  & {1{,}186.8} & {91.1} & \texttt{33333333333333233333}\\
+ &  & {1{,}206.2} & {85.3} & \texttt{33333333333333333333}\\
+\midrule
+Ours $k{=}8$ & 8 & {873.5} & {207.2} & \texttt{22221222122223222222} $\leftarrow$ picked\\
+ &  & {929.1} & {184.6} & \texttt{33333322333033222332}\\
+ &  & {934.2} & {173.1} & \texttt{33333332333123222231}\\
+ &  & {995.9} & {149.9} & \texttt{33333332333133323331}\\
+ &  & {1{,}029.9} & {131.1} & \texttt{33333322333333222333}\\
+ &  & {1{,}075.9} & {121.8} & \texttt{33333332333233333333}\\
+ &  & {1{,}114.6} & {107.1} & \texttt{33333332333333332333}\\
+ &  & {1{,}206.2} & {85.3} & \texttt{33333333333333333333}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Scenario E: scalability without a budget}\label{sec:scale}
+\texttt{ParetoScalabilityStressTest}, opt-in, 8\,GB heap. ``Cover'' is the smallest $\alpha$ such that every plan of
+the exact front is within a factor $\alpha$ on both axes of a returned plan (1 = exact front). Times are for the
+whole search.
+
+\subsection{Long chains: front size grows}
+\begin{center}\small
+\begin{tabular}{@{}lr|rrr|rrr|rrr@{}}
+\toprule
+& & \multicolumn{3}{c|}{Exact Pareto} & \multicolumn{3}{c|}{$\varepsilon=0.1$ per step (v1)} & \multicolumn{3}{c}{Exact + cap 64}\\
+Chain & Pl. & Time & Peak & Front & Time & Peak & Cover & Time & Peak & Cover\\
+\midrule
+25  & 4 & 38\,ms & 665 & 175 & 7\,ms & 100 & 1.084 & 18\,ms & 246 & 1.028\\
+50  & 4 & 61\,ms & 1{,}756 & 457 & 9\,ms & 115 & 1.080 & 41\,ms & 246 & 1.041\\
+100 & 4 & 344\,ms & 4{,}350 & 1{,}109 & 16\,ms & 115 & 1.126 & 81\,ms & 251 & 1.057\\
+200 & 4 & 3.3\,s & 12{,}106 & 2{,}500 & 35\,ms & 115 & 1.078 & 177\,ms & 257 & 1.050\\
+25  & 8 & 75\,ms & 3{,}479 & 309 & 9\,ms & 201 & 1.086 & 58\,ms & 473 & 1.032\\
+50  & 8 & 648\,ms & 10{,}826 & 652 & 24\,ms & 217 & 1.096 & 148\,ms & 482 & 1.048\\
+100 & 8 & 5.1\,s & 25{,}921 & 1{,}269 & 54\,ms & 217 & 1.093 & 336\,ms & 496 & 1.074\\
+200 & 8 & \textbf{41.3\,s} & 65{,}973 & 2{,}562 & 174\,ms & 217 & \textbf{1.128} & \textbf{0.9\,s} & 505 & \textbf{1.055}\\
+\bottomrule
+\end{tabular}
+\end{center}
+The fixed per-step $\varepsilon$ of the first version exceeds its promised factor 1.1 (up to 1.128). The cap keeps
+long chains fast with a measured gap of at most 7.4\%. The fastest and the cheapest plan were exact in every run.
+
+\subsection{Random DAGs: the number of groups grows}
+\begin{center}\small
+\begin{tabular}{@{}lr|rr|rr|rrr|r@{}}
+\toprule
+& & \multicolumn{2}{c|}{Original} & \multicolumn{2}{c|}{Exact Pareto} & \multicolumn{3}{c|}{\textbf{Ours} (exact + cross-group)} & +cap 64\\
+DAG & Seed & Peak & Time & Peak & Time & Peak & Time & Front & Cover\\
+\midrule
+15 & 1 & 1{,}024 & 19\,ms & 17{,}948 & 84\,ms & 570 & 61\,ms & 83 & 1.025\\
+15 & 2 & 256 & 1\,ms & 3{,}495 & 18\,ms & 1{,}357 & 30\,ms & 110 & 1.028\\
+15 & 3 & 256 & 2\,ms & 8{,}240 & 34\,ms & 886 & 35\,ms & 79 & 1.029\\
+20 & 1 & 4{,}096 & 25\,ms & 132{,}224 & 808\,ms & 3{,}391 & 330\,ms & 132 & 1.031\\
+20 & 2 & 1{,}024 & 6\,ms & 68{,}760 & 305\,ms & 5{,}481 & 203\,ms & 135 & 1.029\\
+20 & 3 & 262{,}144 & 983\,ms & 2{,}034{,}432 & 13.9\,s & 19{,}650 & 1.6\,s & 194 & 1.018\\
+25 & 1 & 262{,}144 & 1.3\,s & 2{,}527{,}520 & 14.9\,s & 49{,}777 & 4.0\,s & 181 & 1.029\\
+25 & 2 & 65{,}536 & 0.4\,s & 2{,}397{,}340 & 12.0\,s & 16{,}263 & 1.7\,s & 235 & 1.024\\
+25 & 3 & -- & -- & -- & -- & 100{,}503 & 7.3\,s & 166 & 1.026\\
+30 & 1 & -- & -- & \multicolumn{2}{c|}{out of memory} & 74{,}630 & 5.0\,s & 321 & 1.026\\
+30 & 2 & -- & -- & \multicolumn{2}{c|}{out of memory} & 1{,}462{,}581 & 103.3\,s & 292 & 1.027\\
+30 & 3 & -- & -- & \multicolumn{2}{c|}{out of memory} & 117{,}620 & 17.3\,s & 291 & 1.032\\
+35 & 1 & -- & -- & -- & -- & 535{,}090 & 62.7\,s & 414 & 1.050\\
+35 & 2 & -- & -- & -- & -- & \multicolumn{4}{c}{out of memory (8\,GB)}\\
+\bottomrule
+\end{tabular}
+\end{center}
+``--'' = not run at that size. Exact Pareto stores 8--67$\times$ more partial plans than original Wayang on these
+DAGs. Cross-group pruning brings that below original Wayang in the larger cases and moves the memory limit from
+about 25 to about 35 operators. The remaining limit is the number of groups, $P^{\#\text{open operators}}$, which
+also applies to original Wayang. Without a budget the numbers are higher than in Scenario D: for DAG-20 seed 3, exact
+Pareto stores 8.2\,M partial plans in total here vs.\ 4.9\,M with the budget.
+
+%======================================================================
+\section{Correctness tests}
+\begin{center}\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.40\textwidth}p{0.55\textwidth}@{}}
+\toprule
+Test class & Checks\\
+\midrule
+\texttt{MultiObjectiveSoundnessTest} (11) & additivity of the estimator; $\varepsilon$ split over steps stays within $1+\varepsilon$;
+budget, deadline, least-violation fallback; unit-free weights; \texttt{setProperty} switches the cost model\\
+\texttt{CrossGroupPruningTest} (3) & cross-group pruning gives the same front as brute force (25 DAGs) and as exact Pareto
+(15 branchy DAGs, joins, bushy, branching, triple diamond)\\
+\texttt{TrummerKochCorrectnessTest} (10) & $\alpha$-coverage, weighted pick within $\alpha$, prune-after-concatenate\\
+\texttt{ExactVsAlphaPlanShapeTest},\newline \texttt{ExtensiveMeetingActionItemsTest} & exact DP vs.\ brute force and vs.\ $\alpha$ on many shapes\\
+\texttt{MultiObjectiveCornerCaseTest},\newline \texttt{OptimizerMissedCasesTest},\newline \texttt{ParetoFrontTest}, \texttt{VectorCostTest} & corner cases (NaN, $\infty$, ties, zero costs)\\
+\texttt{PruningComparisonReportTest} (opt-in) & Scenario D; asserts exact and ours return the true best plan\\
+\texttt{ParetoScalabilityStressTest} (opt-in) & Scenario E; asserts cross-group pruning keeps the exact front\\
+\midrule
+All of \texttt{wayang-core} & 153 passed, 0 failed (155 run; 2 opt-in tests skipped by default)\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%======================================================================
+\section{Limitations}\label{sec:limits}
+\begin{itemize}
+\item \textbf{Cross-group pruning is in the simulator only.} In Wayang, the switching cost between two plans'
+open operators has to come from the channel-conversion graph. The triangle inequality holds for the metric that graph
+minimises; for the second objective it has to be checked.
+\item \textbf{Simulator costs are synthetic.} They show how the methods scale and compare, not real runtimes.
+\item \textbf{Platform parameters are Wayang's defaults} (2700\,MHz, Spark start-up 4.5\,s, rates 1 or 128 per ms),
+not measured on the test machine. Money is in abstract units. A calibration script
+(\texttt{calibrate\_costs.py} in \texttt{benchmark-run}: measured start-up and per-platform time stretch, cloud prices per vCPU)
+is ready but was not run for this report.
+\item \textbf{Loops.} Wayang adds the loop feedback junction after pruning the loop body. Exact pruning
+($\varepsilon=0$, the default) still returned the right plan; $\varepsilon=0.1$ returned a k-means plan 0.05\%
+slower than the fastest.
+\item \textbf{Execution was measured for one query} (TPC-H Q3, SF1, Spark \texttt{local[1]}).
+\end{itemize}
+
+%======================================================================
+\section{How to reproduce}
+\begin{verbatim}
+cd wayang
+M="mvn -pl wayang-commons/wayang-core -Denforcer.skip -Drat.skip"
+# unit tests (all of wayang-core)
+$M test
+# Scenario D (target/pruning-report.csv, target/pruning-fronts.csv)
+$M test -Dtest=PruningComparisonReportTest \
+   -Dwayang.report=true -DargLine=-Xmx12g
+# Scenario E
+$M test -Dtest=ParetoScalabilityStressTest \
+   -Dwayang.stress=true -Dwayang.stress.only=dags -DargLine=-Xmx8g
+\end{verbatim}
+Scenarios A--C use the TPC-H, WordCount, k-means, SGD and \path{OptimizerScalabilityTest} applications from
+\path{wayang-benchmark}. They run with the new \path{wayang-core/target/classes} ahead of the assembly jars and with
+\path{-Dwayang.configuration=<properties>}. Optimizer-only runs set \path{wayang.core.debug.skipexecution = true}.
+Results are in \path{benchmark-run/pruning-report.csv} and \path{benchmark-run/pruning-fronts.csv}.
+
+\end{document}

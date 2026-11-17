@@ -67,6 +67,12 @@ public final class ObjectiveSettings {
      */
     public static final String ESTIMATE = PREFIX + "estimate";
 
+    /**
+     * Upper bound on the plans kept per group (0 = unbounded). A group whose front is larger is coarsened until it
+     * fits; the fastest and the cheapest plan are always kept. Bounds the work on long plans.
+     */
+    public static final String MAX_FRONT = PREFIX + "max-front";
+
     public enum EpsilonMode {GLOBAL, PER_STEP}
 
     public enum Estimate {SQUASH, MEAN}
@@ -83,9 +89,11 @@ public final class ObjectiveSettings {
     private final boolean dualJunctions;
     private final String frontFile;
     private final Estimate estimate;
+    private final int maxFront;
 
     private ObjectiveSettings(Configuration configuration) {
-        this.epsilon = VectorCost.finiteEpsilon(configuration.getDoubleProperty(EPSILON, 0.1d));
+        this.epsilon = VectorCost.finiteEpsilon(configuration.getDoubleProperty(EPSILON, 0d));
+        this.maxFront = (int) Math.max(0L, configuration.getLongProperty(MAX_FRONT, 64L));
         this.epsilonMode = "per-step".equalsIgnoreCase(configuration.getStringProperty(EPSILON_MODE, "global"))
                 ? EpsilonMode.PER_STEP
                 : EpsilonMode.GLOBAL;
@@ -171,6 +179,10 @@ public final class ObjectiveSettings {
 
     public boolean isDualJunctions() {
         return this.dualJunctions;
+    }
+
+    public int getMaxFront() {
+        return this.maxFront;
     }
 
     public Estimate getEstimate() {
