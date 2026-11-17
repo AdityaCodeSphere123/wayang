@@ -22,6 +22,7 @@ import org.apache.wayang.core.api.Configuration;
 import org.apache.wayang.core.optimizer.OptimizationContext;
 import org.apache.wayang.core.optimizer.ProbabilisticDoubleInterval;
 import org.apache.wayang.core.optimizer.cardinality.CardinalityEstimate;
+import org.apache.wayang.core.optimizer.costs.TimeEstimate;
 import org.apache.wayang.core.plan.executionplan.Channel;
 import org.apache.wayang.core.plan.executionplan.ExecutionTask;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
@@ -192,6 +193,20 @@ public class DefaultChannelConversion extends ChannelConversion {
         // Estimate time.
         operatorContext.updateCostEstimate();
         return operatorContext.getCostEstimate();
+    }
+
+    @Override
+    public ProbabilisticDoubleInterval estimateConversionTime(CardinalityEstimate cardinality,
+                                                              int numExecutions,
+                                                              OptimizationContext optimizationContext) {
+        final ExecutionOperator executionOperator = this.executionOperatorFactory.apply(null, optimizationContext.getConfiguration());
+        final OptimizationContext.OperatorContext operatorContext = optimizationContext.addOneTimeOperator(executionOperator);
+        operatorContext.setNumExecutions(numExecutions);
+        this.setCardinality(operatorContext, cardinality);
+        operatorContext.updateCostEstimate();
+        final TimeEstimate time = operatorContext.getTimeEstimate();
+        return new ProbabilisticDoubleInterval(
+                time.getLowerEstimate(), time.getUpperEstimate(), time.getCorrectnessProbability());
     }
 
     @Override

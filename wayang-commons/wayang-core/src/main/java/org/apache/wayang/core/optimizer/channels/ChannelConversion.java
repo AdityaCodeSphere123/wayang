@@ -103,6 +103,22 @@ public abstract class ChannelConversion {
                                                                        OptimizationContext optimizationContext);
 
     /**
+     * Estimate the time to carry out the conversion for a given {@code cardinality}, as an interval in milliseconds.
+     * Used by the multi-objective optimizer to find the fastest conversion (as opposed to the cheapest one).
+     * The default falls back to {@link #estimateConversionCost}, which is time scaled by the platform rate.
+     *
+     * @param cardinality         the {@link CardinalityEstimate} of data to be converted
+     * @param numExecutions       expected number of executions of this instance
+     * @param optimizationContext provides a {@link Configuration} and keeps around generated optimization information
+     * @return the time estimate in milliseconds
+     */
+    public ProbabilisticDoubleInterval estimateConversionTime(CardinalityEstimate cardinality,
+                                                              int numExecutions,
+                                                              OptimizationContext optimizationContext) {
+        return this.estimateConversionCost(cardinality, numExecutions, optimizationContext);
+    }
+
+    /**
      * Determine whether this instance is suitable to handle the given conversion.
      *
      * @param cardinality         the {@link CardinalityEstimate} of data to be converted

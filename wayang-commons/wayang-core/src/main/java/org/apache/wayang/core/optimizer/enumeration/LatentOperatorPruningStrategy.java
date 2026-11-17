@@ -20,7 +20,6 @@ package org.apache.wayang.core.optimizer.enumeration;
 
 import org.apache.wayang.core.api.Configuration;
 import org.apache.wayang.core.api.exception.WayangException;
-import org.apache.wayang.core.optimizer.costs.VectorCost;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
 import org.apache.wayang.core.plan.wayangplan.Slot;
 import org.apache.wayang.core.platform.Platform;
@@ -44,20 +43,30 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
 
     private static final Logger logger = LogManager.getLogger(LatentOperatorPruningStrategy.class);
 
-    private boolean vectorPruning;
-    private double epsilon;
+    /**
+     * With {@code wayang.core.optimizer.objectives.vector=true}, keep a Pareto set per group instead of one plan.
+     * Delegates to {@link ParetoPruningStrategy} so both entry points behave identically.
+     */
+    private ParetoPruningStrategy vectorDelegate;
 
     @Override
     public void configure(Configuration configuration) {
-        this.vectorPruning = configuration.getBooleanProperty("wayang.core.optimizer.objectives.vector", false);
-        this.epsilon = VectorCost.finiteEpsilon(
-                configuration.getDoubleProperty("wayang.core.optimizer.objectives.epsilon", 0.1d));
+        if (configuration.getBooleanProperty("wayang.core.optimizer.objectives.vector", false)) {
+            this.vectorDelegate = new ParetoPruningStrategy();
+            this.vectorDelegate.configure(configuration);
+        } else {
+            this.vectorDelegate = null;
+        }
     }
 
     @Override
     public void prune(PlanEnumeration planEnumeration) {
         // Skip if there is nothing to do...
         if (planEnumeration.getPlanImplementations().size() < 2) return;
+        if (this.vectorDelegate != null) {
+            this.vectorDelegate.prune(planEnumeration);
+            return;
+        }
 
         // Group plans.
         final Collection<List<PlanImplementation>> competingPlans =
@@ -68,7 +77,7 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
                                 Collectors.toList()))
                         .values();
         final List<PlanImplementation> bestPlans = competingPlans.stream()
-                .flatMap(group -> this.selectSurvivors(group).stream())
+                .map(this::selectBestPlanNary)
                 .collect(Collectors.toList());
         final Collection<PlanImplementation> current = planEnumeration.getPlanImplementations();
         current.clear();
@@ -86,22 +95,6 @@ public class LatentOperatorPruningStrategy implements PlanEnumerationPruningStra
                 implementation.getUtilizedPlatforms(),
                 new HashSet<>(implementation.getInterfaceOperators())
         );
-    }
-
-    private Collection<PlanImplementation> selectSurvivors(List<PlanImplementation> planImplementations) {
-        if (!this.vectorPruning) {
-            return java.util.Collections.singletonList(this.selectBestPlanNary(planImplementations));
-        }
-        final List<PlanImplementation> kept = ParetoFront.retain(
-                planImplementations,
-                plan -> plan.getVectorCostEstimate(true),
-                this.epsilon,
-                PlanImplementation.structuralComparator()
-        );
-        if (kept.isEmpty() && !planImplementations.isEmpty()) {
-            return java.util.Collections.singletonList(planImplementations.get(0));
-        }
-        return kept;
     }
 
     private PlanImplementation selectBestPlanNary(List<PlanImplementation> planImplementation) {

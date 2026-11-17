@@ -261,8 +261,19 @@ class TrummerKochCorrectnessTest {
         if (epsilon <= 0d) {
             return;
         }
+        // ParetoFront always keeps the exact fastest and the exact cheapest plan on top of one plan per bucket,
+        // so those two may share a bucket with another member.
+        final Named fastest = front.stream()
+                .min(java.util.Comparator.<Named>comparingDouble(n -> n.cost.getLatency())
+                        .thenComparingDouble(n -> n.cost.getMonetary())).orElse(null);
+        final Named cheapest = front.stream()
+                .min(java.util.Comparator.<Named>comparingDouble(n -> n.cost.getMonetary())
+                        .thenComparingDouble(n -> n.cost.getLatency())).orElse(null);
         Set<String> seen = new HashSet<>();
         for (Named plan : front) {
+            if (plan == fastest || plan == cheapest) {
+                continue;
+            }
             long[] b = plan.cost.logBuckets(epsilon);
             String key = b[0] + "," + b[1];
             assertTrue(seen.add(key), "two front members share bucket " + key);

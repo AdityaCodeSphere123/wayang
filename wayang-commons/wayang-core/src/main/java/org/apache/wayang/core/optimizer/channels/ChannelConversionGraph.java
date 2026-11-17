@@ -127,7 +127,19 @@ public class ChannelConversionGraph {
                                             List<InputSlot<?>> destInputSlots,
                                             OptimizationContext optimizationContext,
                                             boolean isRequestBreakpoint) {
-        return new ShortestTreeSearcher(output, null, destInputSlots, optimizationContext, isRequestBreakpoint).getJunction();
+        return this.findMinimumCostJunction(output, destInputSlots, optimizationContext, isRequestBreakpoint, Metric.SQUASHED_COST);
+    }
+
+    /**
+     * Like {@link #findMinimumCostJunction(OutputSlot, List, OptimizationContext, boolean)}, but minimises the given
+     * {@link Metric} along the conversion tree.
+     */
+    public Junction findMinimumCostJunction(OutputSlot<?> output,
+                                            List<InputSlot<?>> destInputSlots,
+                                            OptimizationContext optimizationContext,
+                                            boolean isRequestBreakpoint,
+                                            Metric metric) {
+        return new ShortestTreeSearcher(output, null, destInputSlots, optimizationContext, isRequestBreakpoint, metric).getJunction();
     }
 
     /**
@@ -144,7 +156,31 @@ public class ChannelConversionGraph {
                                             Collection<Channel> openChannels,
                                             List<InputSlot<?>> destInputSlots,
                                             OptimizationContext optimizationContext) {
-        return new ShortestTreeSearcher(output, openChannels, destInputSlots, optimizationContext, false).getJunction();
+        return this.findMinimumCostJunction(output, openChannels, destInputSlots, optimizationContext, Metric.SQUASHED_COST);
+    }
+
+    /**
+     * Like {@link #findMinimumCostJunction(OutputSlot, Collection, List, OptimizationContext)}, but minimises the
+     * given {@link Metric} along the conversion tree.
+     */
+    public Junction findMinimumCostJunction(OutputSlot<?> output,
+                                            Collection<Channel> openChannels,
+                                            List<InputSlot<?>> destInputSlots,
+                                            OptimizationContext optimizationContext,
+                                            Metric metric) {
+        return new ShortestTreeSearcher(output, openChannels, destInputSlots, optimizationContext, false, metric).getJunction();
+    }
+
+    /**
+     * What a conversion tree minimises.
+     */
+    public enum Metric {
+        /** Legacy: cost estimate squashed with the configured squasher (geometric mean by default). */
+        SQUASHED_COST,
+        /** Expected monetary cost (time × platform rate), matching the vector cost model. */
+        MEAN_COST,
+        /** Expected time in milliseconds, matching the vector cost model's latency axis. */
+        MEAN_TIME
     }
 
     /**
@@ -340,6 +376,11 @@ public class ChannelConversionGraph {
         private Junction result = null;
 
         /**
+         * What the search minimises.
+         */
+        private final Metric metric;
+
+        /**
          * Create a new instance.
          *
          * @param sourceOutput        provides a {@link Channel} that should be converted
@@ -352,9 +393,11 @@ public class ChannelConversionGraph {
                                      Collection<Channel> openChannels,
                                      List<InputSlot<?>> destInputs,
                                      OptimizationContext optimizationContext,
-                                     boolean isRequestBreakpoint) {
+                                     boolean isRequestBreakpoint,
+                                     Metric metric) {
 
             // Store relevant variables.
+            this.metric = metric == null ? Metric.SQUASHED_COST : metric;
             this.isRequestBreakpoint = isRequestBreakpoint && openChannels == null; // No breakpoints requestable.
             this.optimizationContext = optimizationContext;
             this.optimizationContextCopy = new DefaultOptimizationContext(this.optimizationContext);
@@ -806,10 +849,21 @@ public class ChannelConversionGraph {
             return this.conversionCostCache.computeIfAbsent(
                     channelConversion,
                     key -> {
-                        final ProbabilisticDoubleInterval costEstimate = key.estimateConversionCost(
-                                this.cardinality, this.numExecutions, this.optimizationContextCopy
-                        );
-                        return costSquasher.applyAsDouble(costEstimate);
+                        switch (this.metric) {
+                            case MEAN_TIME:
+                                return key.estimateConversionTime(
+                                        this.cardinality, this.numExecutions, this.optimizationContextCopy
+                                ).getAverageEstimate();
+                            case MEAN_COST:
+                                return key.estimateConversionCost(
+                                        this.cardinality, this.numExecutions, this.optimizationContextCopy
+                                ).getAverageEstimate();
+                            case SQUASHED_COST:
+                            default:
+                                return costSquasher.applyAsDouble(key.estimateConversionCost(
+                                        this.cardinality, this.numExecutions, this.optimizationContextCopy
+                                ));
+                        }
                     }
             );
         }

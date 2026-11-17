@@ -179,6 +179,24 @@ public class Junction {
     }
 
     /**
+     * Provides the {@link OptimizationContext.OperatorContext}s of all conversion operators of this instance for a
+     * given {@link OptimizationContext}, so that callers can aggregate per-operator estimates themselves.
+     *
+     * @param optimizationContext the {@link OptimizationContext}
+     * @return the {@link OptimizationContext.OperatorContext}s (without {@code null}s)
+     */
+    public java.util.List<OptimizationContext.OperatorContext> getConversionOperatorContexts(OptimizationContext optimizationContext) {
+        final OptimizationContext localMatchingOptCtx = this.findMatchingOptimizationContext(optimizationContext);
+        assert localMatchingOptCtx != null : "No matching OptimizationContext for in Junction.";
+        if (localMatchingOptCtx == null) return java.util.Collections.emptyList();
+        return this.conversionTasks.stream()
+                .map(ExecutionTask::getOperator)
+                .map(localMatchingOptCtx::getOperatorContext)
+                .filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toList());
+    }
+
+    /**
      * Determines a matching {@link OptimizationContext} from {@link #optimizationContexts} w.r.t. the given
      * {@link OptimizationContext}. A match is given if the local {@link OptimizationContext} is either forked
      * from {@code externalOptCtx} or a parent.

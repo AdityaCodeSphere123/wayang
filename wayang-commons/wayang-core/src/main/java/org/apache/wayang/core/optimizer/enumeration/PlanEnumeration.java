@@ -23,6 +23,7 @@ import org.apache.wayang.commons.util.profiledb.model.measurement.TimeMeasuremen
 import org.apache.wayang.core.api.Job;
 import org.apache.wayang.core.optimizer.OptimizationContext;
 import org.apache.wayang.core.optimizer.channels.ChannelConversionGraph;
+import org.apache.wayang.core.optimizer.costs.ObjectiveSettings;
 import org.apache.wayang.core.plan.executionplan.Channel;
 import org.apache.wayang.core.plan.executionplan.ExecutionTask;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
@@ -310,6 +311,7 @@ public class PlanEnumeration {
 
         // Preparatory initializations.
         final ChannelConversionGraph channelConversionGraph = optimizationContext.getChannelConversionGraph();
+        final boolean dualJunctions = ObjectiveSettings.of(optimizationContext.getConfiguration()).isDualJunctions();
 
         // Allocate result collector.
         Collection<PlanImplementation> result = new LinkedList<>();
@@ -396,20 +398,16 @@ public class PlanEnumeration {
             assert outputOperator.isExecutionOperator() : String.format("Expected execution operator, found %s.", outputOperator);
             TimeMeasurement channelConversionMeasurement = concatenationMeasurement == null ?
                     null : concatenationMeasurement.start("Channel Conversion");
-            final Junction junction = openChannels == null || openChannels.isEmpty() ?
-                    channelConversionGraph.findMinimumCostJunction(
-                            execOutput,
-                            execInputs,
-                            innerPlanImplementation.getOptimizationContext(),
-                            isRequestBreakpoint
-                    ) :
-                    channelConversionGraph.findMinimumCostJunction(
-                            execOutput,
-                            openChannels,
-                            execInputs,
-                            innerPlanImplementation.getOptimizationContext());
+            final List<Junction> junctions = findJunctions(
+                    channelConversionGraph,
+                    execOutput,
+                    openChannels,
+                    execInputs,
+                    innerPlanImplementation.getOptimizationContext(),
+                    isRequestBreakpoint,
+                    dualJunctions);
             if (channelConversionMeasurement != null) channelConversionMeasurement.stop();
-            if (junction == null) continue;
+            if (junctions.isEmpty()) continue;
 
             // If we found a junction, then we can enumerate all PlanImplementation combinations.
         final List<List<PlanImplementation>> groupPlans = WayangCollections.map(
@@ -422,17 +420,72 @@ public class PlanEnumeration {
                             .collect(Collectors.toList());
                 });
 
-            for (List<PlanImplementation> planCombo : WayangCollections.streamedCrossProduct(groupPlans)) {
-                PlanImplementation basePlan = planCombo.get(0);
-                List<PlanImplementation> targetPlans = planCombo.subList(0, planCombo.size());
-                PlanImplementation concatenatedPlan = basePlan.concatenate(targetPlans, junction, basePlan, concatenationEnumeration);
-                if (concatenatedPlan != null) {
-                    result.add(concatenatedPlan);
+            for (Junction junction : junctions) {
+                for (List<PlanImplementation> planCombo : WayangCollections.streamedCrossProduct(groupPlans)) {
+                    PlanImplementation basePlan = planCombo.get(0);
+                    List<PlanImplementation> targetPlans = planCombo.subList(0, planCombo.size());
+                    PlanImplementation concatenatedPlan = basePlan.concatenate(targetPlans, junction, basePlan, concatenationEnumeration);
+                    if (concatenatedPlan != null) {
+                        result.add(concatenatedPlan);
+                    }
                 }
             }
         }
 
         return result;
+    }
+
+    /**
+     * Finds the {@link Junction}(s) to connect {@code execOutput} to {@code execInputs}.
+     * <p>By default there is one: the conversion tree with the lowest (squashed) cost. With
+     * {@code wayang.core.optimizer.objectives.junctions=dual}, the multi-objective optimizer also keeps the fastest
+     * conversion tree when it differs from the cheapest one. A single shortest path per boundary would otherwise fix
+     * the trade-off at every platform switch before the Pareto pruning ever sees it. Keeping the two extreme trees
+     * costs at most a factor 2 per concatenation, and the Pareto prune right after removes the dominated plans.</p>
+     */
+    private static List<Junction> findJunctions(ChannelConversionGraph channelConversionGraph,
+                                                OutputSlot<?> execOutput,
+                                                Collection<Channel> openChannels,
+                                                List<InputSlot<?>> execInputs,
+                                                OptimizationContext optimizationContext,
+                                                boolean isRequestBreakpoint,
+                                                boolean dualJunctions) {
+        final boolean isOpen = openChannels != null && !openChannels.isEmpty();
+        if (!dualJunctions) {
+            final Junction junction = isOpen
+                    ? channelConversionGraph.findMinimumCostJunction(execOutput, openChannels, execInputs, optimizationContext)
+                    : channelConversionGraph.findMinimumCostJunction(execOutput, execInputs, optimizationContext, isRequestBreakpoint);
+            return junction == null ? Collections.emptyList() : Collections.singletonList(junction);
+        }
+        final List<Junction> junctions = new ArrayList<>(2);
+        final Set<String> signatures = new LinkedHashSet<>(2);
+        for (ChannelConversionGraph.Metric metric : new ChannelConversionGraph.Metric[]{
+                ChannelConversionGraph.Metric.MEAN_COST, ChannelConversionGraph.Metric.MEAN_TIME}) {
+            final Junction junction = isOpen
+                    ? channelConversionGraph.findMinimumCostJunction(execOutput, openChannels, execInputs, optimizationContext, metric)
+                    : channelConversionGraph.findMinimumCostJunction(execOutput, execInputs, optimizationContext, isRequestBreakpoint, metric);
+            if (junction != null && signatures.add(signature(junction))) {
+                junctions.add(junction);
+            }
+        }
+        return junctions;
+    }
+
+    /**
+     * Structural description of a {@link Junction}: which conversion operators it uses and which channels it ends in.
+     */
+    private static String signature(Junction junction) {
+        final String tasks = junction.getConversionTasks().stream()
+                .map(task -> task.getOperator().getClass().getName() + "->"
+                        + java.util.Arrays.stream(task.getOutputChannels())
+                        .map(channel -> channel == null ? "null" : String.valueOf(channel.getDescriptor()))
+                        .collect(Collectors.joining("|")))
+                .sorted()
+                .collect(Collectors.joining(","));
+        final String targets = junction.getTargetChannels().stream()
+                .map(channel -> channel == null ? "null" : String.valueOf(channel.getDescriptor()))
+                .collect(Collectors.joining(","));
+        return tasks + "=>" + targets;
     }
 
     /**

@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,24 +50,36 @@ public final class ParetoFront {
         if (items == null || items.isEmpty()) {
             return new ArrayList<>();
         }
+        // Evaluate every cost exactly once: sorting and bucketing look costs up many times.
+        final Map<T, VectorCost> cache = new IdentityHashMap<>(items.size() * 2);
         List<T> cleaned = new ArrayList<>(items.size());
         for (T item : items) {
-            if (item == null) {
+            if (item == null || cache.containsKey(item)) {
                 continue;
             }
             final VectorCost cost = costs.apply(item);
             if (cost == null) {
                 continue;
             }
+            cache.put(item, cost);
             cleaned.add(item);
         }
+        costs = cache::get;
         if (cleaned.size() <= 1) {
             return cleaned;
         }
         final double eps = VectorCost.finiteEpsilon(epsilon);
-        final Collection<T> representatives = eps > 0d
-                ? bucketRepresentatives(cleaned, costs, eps, tieBreaker)
-                : cleaned;
+        Collection<T> representatives = cleaned;
+        if (eps > 0d) {
+            // One plan per log-bucket, plus the exact fastest and the exact cheapest plan. Keeping the two extremes
+            // costs at most two plans, and it makes "fastest" and "cheapest" exact for any ε: with additive costs the
+            // fastest (cheapest) complete plan always extends the fastest (cheapest) prefix of its group.
+            final java.util.LinkedHashSet<T> kept = new java.util.LinkedHashSet<>(
+                    bucketRepresentatives(cleaned, costs, eps, tieBreaker));
+            kept.add(extreme(cleaned, costs, true, tieBreaker));
+            kept.add(extreme(cleaned, costs, false, tieBreaker));
+            representatives = kept;
+        }
         return exactPareto(representatives, costs, tieBreaker);
     }
 
@@ -135,6 +148,18 @@ public final class ParetoFront {
             }
         }
         return front;
+    }
+
+    /** Lexicographic minimum: latency then money ({@code byLatency}), or money then latency. */
+    private static <T> T extreme(Collection<T> items, Function<T, VectorCost> costs, boolean byLatency,
+                                 Comparator<T> tieBreaker) {
+        Comparator<T> order = byLatency
+                ? Comparator.<T>comparingDouble(t -> costs.apply(t).getLatency())
+                .thenComparingDouble(t -> costs.apply(t).getMonetary())
+                : Comparator.<T>comparingDouble(t -> costs.apply(t).getMonetary())
+                .thenComparingDouble(t -> costs.apply(t).getLatency());
+        if (tieBreaker != null) order = order.thenComparing(tieBreaker);
+        return items.stream().min(order).orElseThrow(IllegalStateException::new);
     }
 
     private static <T> T prefer(T existing, T candidate, Function<T, VectorCost> costs, Comparator<T> tieBreaker) {

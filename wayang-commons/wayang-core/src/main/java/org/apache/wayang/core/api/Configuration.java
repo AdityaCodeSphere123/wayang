@@ -744,6 +744,10 @@ public class Configuration implements Serializable {
 
     public void setProperty(String key, String value) {
         this.properties.set(key, value);
+        // The cost model is an object, not just a property: switch it as well, as file loading does.
+        if ("wayang.core.optimizer.cost.model".equals(key)) {
+            applyCostModel(this, value);
+        }
     }
 
     public void removeProperty(String key) {

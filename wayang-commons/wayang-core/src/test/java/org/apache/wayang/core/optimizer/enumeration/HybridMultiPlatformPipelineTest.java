@@ -21,10 +21,14 @@ package org.apache.wayang.core.optimizer.enumeration;
 import org.apache.wayang.core.optimizer.costs.VectorCost;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -131,6 +135,59 @@ class HybridMultiPlatformPipelineTest {
         assertEquals(exhaustive.cost.getLatency(), dp.cost.getLatency(), 1e-9);
     }
 
+    @Test
+    void budgetSweepChangesPlanThenMatchesOriginalAtLargeB() throws Exception {
+        List<Assignment> universe = enumerateLinear();
+        Assignment original = pickMinLatency(universe, Double.POSITIVE_INFINITY);
+        List<Assignment> exactFront = linearParetoFront(0d);
+        List<Assignment> alphaFront = linearParetoFront(0.1d);
+
+        double maxMoney = 0d;
+        for (Assignment a : universe) {
+            maxMoney = Math.max(maxMoney, a.cost.getMonetary());
+        }
+        int bMax = (int) Math.ceil(maxMoney) + 15;
+
+        Path out = Paths.get("/Users/aditya/Desktop/classes/Apache-Wayang-Minor-Project-/benchmark-run/budget-sweep.csv");
+        Files.createDirectories(out.getParent());
+        LinkedHashSet<String> exactPlans = new LinkedHashSet<>();
+        try (java.io.BufferedWriter w = Files.newBufferedWriter(out)) {
+            w.write("budget,orig_latency,orig_money,orig_path,exact_latency,exact_money,exact_path,alpha_latency,alpha_money,alpha_path,exact_same,alpha_same\n");
+            for (int b = 0; b <= bMax; b++) {
+                Assignment exact = VectorPlanSelection.pick(exactFront, a -> a.cost, b, 1d, 0d, BY_PATH);
+                Assignment alpha = VectorPlanSelection.pick(alphaFront, a -> a.cost, b, 1d, 0d, BY_PATH);
+                exactPlans.add(exact.path);
+                boolean exactSame = Math.abs(exact.cost.getLatency() - original.cost.getLatency()) < 1e-6;
+                boolean alphaSame = Math.abs(alpha.cost.getLatency() - original.cost.getLatency()) < 1e-6;
+                w.write(String.format(Locale.ROOT,
+                        "%d,%.4f,%.4f,%s,%.4f,%.4f,%s,%.4f,%.4f,%s,%s,%s%n",
+                        b,
+                        original.cost.getLatency(), original.cost.getMonetary(), csv(original.path),
+                        exact.cost.getLatency(), exact.cost.getMonetary(), csv(exact.path),
+                        alpha.cost.getLatency(), alpha.cost.getMonetary(), csv(alpha.path),
+                        exactSame, alphaSame));
+            }
+        }
+
+        Assignment hugeExact = VectorPlanSelection.pick(exactFront, a -> a.cost, Double.POSITIVE_INFINITY, 1d, 0d, BY_PATH);
+        Assignment hugeAlpha = VectorPlanSelection.pick(alphaFront, a -> a.cost, Double.POSITIVE_INFINITY, 1d, 0d, BY_PATH);
+        assertTrue(exactPlans.size() >= 3,
+                "minute budget changes should pick different work, got " + exactPlans.size() + " plans");
+        assertEquals(original.cost.getLatency(), hugeExact.cost.getLatency(), 1e-6,
+                "unbounded budget: exact Pareto latency must match original min-latency Wayang pick");
+        assertEquals(original.cost.getLatency(), hugeAlpha.cost.getLatency(), 1e-6,
+                "unbounded budget: α-Pareto latency must match original min-latency Wayang pick");
+        System.out.println("Budget sweep wrote " + out);
+        System.out.println("Original (min latency, no bound): " + original);
+        System.out.println("Distinct exact picks as B grows: " + exactPlans.size());
+        System.out.println("Huge-B exact: " + hugeExact);
+        System.out.println("Huge-B alpha: " + hugeAlpha);
+    }
+
+    private static String csv(String path) {
+        return path.replace(',', ';').replace(' ', '_');
+    }
+
     private static List<Assignment> enumerateLinear() {
         List<Assignment> out = new ArrayList<>();
         int n = PLATFORMS.length;
@@ -164,6 +221,10 @@ class HybridMultiPlatformPipelineTest {
     }
 
     private static Assignment pruneAfterConcatLinear(double epsilon) {
+        return VectorPlanSelection.pick(linearParetoFront(epsilon), a -> a.cost, BUDGET, 1d, 0d, BY_PATH);
+    }
+
+    private static List<Assignment> linearParetoFront(double epsilon) {
         List<Partial> front = new ArrayList<>();
         for (Platform p : PLATFORMS) {
             front.add(new Partial(p.name(), p, LATENCY[0][p.ordinal()], MONEY[0][p.ordinal()]));
@@ -184,10 +245,9 @@ class HybridMultiPlatformPipelineTest {
             }
             front = retainPartials(next, epsilon);
         }
-        List<Assignment> plans = front.stream()
+        return front.stream()
                 .map(p -> new Assignment(p.path, new VectorCost(p.latency, p.money), EnumSet.of(p.last)))
                 .collect(Collectors.toList());
-        return VectorPlanSelection.pick(plans, a -> a.cost, BUDGET, 1d, 0d, BY_PATH);
     }
 
     private static Assignment greedyLinear(boolean byLatency) {
