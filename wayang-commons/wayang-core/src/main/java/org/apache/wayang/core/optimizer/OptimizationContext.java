@@ -30,6 +30,7 @@ import org.apache.wayang.core.optimizer.costs.LoadProfileEstimators;
 import org.apache.wayang.core.optimizer.costs.LoadProfileToTimeConverter;
 import org.apache.wayang.core.optimizer.costs.TimeEstimate;
 import org.apache.wayang.core.optimizer.costs.TimeToCostConverter;
+import org.apache.wayang.core.optimizer.costs.learned.OperatorTimeModel;
 import org.apache.wayang.core.optimizer.enumeration.PlanEnumerationPruningStrategy;
 import org.apache.wayang.core.plan.wayangplan.CompositeOperator;
 import org.apache.wayang.core.plan.wayangplan.ExecutionOperator;
@@ -563,6 +564,14 @@ public abstract class OptimizationContext {
             final Platform platform = executionOperator.getPlatform();
             final LoadProfileToTimeConverter timeConverter = configuration.getLoadProfileToTimeConverterProvider().provideFor(platform);
             this.timeEstimate = TimeEstimate.MINIMUM.plus(timeConverter.convert(this.loadProfile));
+
+            // Optional learned cost model (wayang.core.optimizer.learned-cost-model): replaces the time estimate of
+            // the operators it was trained on; all others keep Wayang's estimate.
+            final OperatorTimeModel learnedModel = OperatorTimeModel.forConfiguration(configuration);
+            if (learnedModel != null) {
+                final TimeEstimate learned = learnedModel.estimate(this, this.loadProfile, this.timeEstimate, configuration);
+                if (learned != null) this.timeEstimate = learned;
+            }
             if (OptimizationContext.this.logger.isDebugEnabled()) {
                 OptimizationContext.this.logger.debug(
                         "Setting time estimate of {} to {}.", this.operator, this.timeEstimate
