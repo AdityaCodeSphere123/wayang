@@ -1,0 +1,614 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+% ------------------------------------------------------------
+% Theme and packages
+% ------------------------------------------------------------
+\usetheme{Madrid}
+\usecolortheme{default}
+\definecolor{WayangNavy}{HTML}{17324D}
+\definecolor{WayangTeal}{HTML}{008C95}
+\definecolor{WayangGold}{HTML}{E3A12F}
+\definecolor{WayangLight}{HTML}{F2F6F8}
+\definecolor{WayangGray}{HTML}{455A64}
+\setbeamercolor{palette primary}{bg=WayangNavy,fg=white}
+\setbeamercolor{palette secondary}{bg=WayangNavy!88,fg=white}
+\setbeamercolor{palette tertiary}{bg=WayangTeal,fg=white}
+\setbeamercolor{structure}{fg=WayangTeal}
+\setbeamercolor{frametitle}{bg=WayangNavy,fg=white}
+\setbeamercolor{title}{fg=WayangNavy}
+\setbeamercolor{block title}{bg=WayangTeal!15,fg=WayangNavy}
+\setbeamercolor{block body}{bg=WayangLight,fg=black}
+\setbeamercolor{alertblock title}{bg=WayangGold!24,fg=WayangNavy}
+\setbeamercolor{alertblock body}{bg=WayangGold!8,fg=black}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamersize{text margin left=7mm,text margin right=7mm}
+
+\usepackage{amsmath,amssymb,booktabs,array,tabularx,multicol}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=WayangTeal,urlcolor=WayangTeal,citecolor=WayangTeal}
+\urlstyle{same}
+\newcommand{\paperlink}[2]{\href{#1}{\textcolor{WayangTeal}{\underline{#2}}}}
+\newcommand{\smallurl}[1]{\vspace{1mm}{\scriptsize\textcolor{WayangGray}{\url{#1}}}}
+\newcommand{\modelname}[1]{\textbf{\textcolor{WayangNavy}{#1}}}
+\newcommand{\takeaway}[1]{\begin{block}{Wayang takeaway}#1\end{block}}
+\newcommand{\target}{\textcolor{WayangTeal}{\widehat{T}}}
+
+\title[Learned Cost Models for Wayang]{Learning-Based Query Cost Models for Apache Wayang}
+\subtitle{Methodology-focused review: operator, pipeline, and plan-level approaches}
+\author{Research literature review}
+\institute{Focus: candidate-plan costing with cardinality estimates}
+\date{}
+
+\begin{document}
+
+% ------------------------------------------------------------
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}[shrink=10]{The target problem in Wayang}
+\small
+Wayang enumerates candidate platform-specific plans. A learned estimator should score each candidate before execution, using information available during optimization.
+
+\vspace{2mm}
+\begin{block}{A practical operator-level formulation}
+For an operator instance $o$ executed on platform $e$:
+\[
+  \widehat{\mathbf L}_o = f_{\theta,\,\mathrm{type}(o),e}
+  \bigl(N_{\mathrm{in}},N_{\mathrm{out}},\mathbf z_o,\mathbf r_e\bigr)
+\]
+\begin{itemize}\setlength\itemsep{1pt}
+  \item $N$: estimated input/output cardinalities.
+  \item $\mathbf z_o$: operator properties (e.g., join type, columns, selectivity, partitioning).
+  \item $\mathbf r_e$: engine/resource configuration (executors, cores, memory, etc.).
+  \item $\mathbf L$: a target such as CPU time, cost, etc.
+\end{itemize}
+\end{block}
+\begin{alertblock}{Important distinction}
+There can be two appraches:
+\begin{itemize}
+    \item 1. Predicting the cost for just single operators and then wayang adds them up to calculate total cost
+    \item 2. Predicting the cost of the whole query(subplan) which is how generally estimators work 
+\end{itemize}
+\end{alertblock}
+\end{frame}
+
+% \begin{frame}[shrink=10]{How to compare the papers}
+% \small
+% \begin{tabularx}{\textwidth}{@{}p{2.6cm}p{3.2cm}X@{}}
+% \toprule
+% \textbf{Prediction granularity} & \textbf{Typical target} & \textbf{What it means for Wayang} \\
+% \midrule
+% Single operator & CPU / I/O / operator time & Directly learnable from profiling; needs a rule for composition. \\
+% Operator + children & Start-time and subtree runtime & Can capture blocking, pipelining, and parent--child interactions. \\
+% Operator subgraph & Learned cost for a recurring pattern & More expressive for shuffle/join patterns; more training coverage needed. \\
+% Pipeline & Time per input tuple, then pipeline runtime & Fast inference; useful when execution is pipelined. \\
+% Whole plan / query & End-to-end runtime or resource vector & Good as a comparison baseline, but often less transferable across unseen plans. \\
+% \bottomrule
+% \end{tabularx}
+% \vspace{3mm}
+% \takeaway{The first five papers below are most useful for designing the learned cost component. The last four contribute ideas for pipeline modeling, Spark-specific modeling, cross-engine transfer, or multi-metric prediction.}
+% \end{frame}
+
+% ============================================================
+% 1. AKDERE ET AL.
+% ============================================================
+\section{Operator-level foundations}
+\begin{frame}[shrink=10]{1. Learning-based Query Performance Modeling and Prediction (ICDE 2012) — model}
+\small
+\textbf{Paper:} M. Akdere, U. Cetintemel, M. Riondato, E. Upfal, S. B. Zdonik.
+\hfill\paperlink{https://doi.org/10.1109/ICDE.2012.64}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: static features from PostgreSQL's optimized plan: estimated input/output rows, selectivity, estimated I/O, plus predictions from child operators.
+  \item Output: elapsed execution time. For each operator type, the operator model predicts both time to first output (start-time) and total time for the operator-rooted subplan (run-time).
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: learn local models, compose bottom-up}
+For operator type $k$, learn two functions:
+\[
+\widehat{s}_o=f^{(s)}_k(\mathbf x_o,\widehat{s}_{c_1},\widehat{t}_{c_1},\widehat{s}_{c_2},\widehat{t}_{c_2}),
+\]
+\[
+\widehat{t}_o=f^{(t)}_k(\mathbf x_o,\widehat{s}_{c_1},\widehat{t}_{c_1},\widehat{s}_{c_2},\widehat{t}_{c_2}).
+\]
+Here $\mathbf x_o$ includes input rows $n_{t1},n_{t2}$, output rows $n_t$, selectivity, and estimated pages $n_p$. The root's runtime prediction estimates query latency.
+\end{block}
+
+\begin{block}{Learning details}
+The paper uses forward feature selection and regression models; plan-level models use support-vector regression. The operator-level models are composed to handle different tree structures.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{1. Akdere et al. — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Run training queries and record the measured execution latency.
+  \item Experimental system: PostgreSQL; analytical workloads based on TPC-H, at 1 GB and 10 GB scales.
+  \item Features are obtained before execution from optimizer estimates (e.g., EXPLAIN); labels come from executing the workload.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Operator-level models generalize to new combinations of operators better than a separate model for every complete query.
+  \item The start-time/run-time pair gives a way to represent blocking and pipelining. A materialization subplan, for example, may execute once but be consumed repeatedly by a parent nested-loop join.
+  \item A hybrid strategy uses specialized plan/subplan predictors where the general operator models are inaccurate.
+\end{itemize}
+\end{block}
+\takeaway{Most directly reusable idea: train a function per operator type, feed cardinality estimates and child predictions to it, then compose the predictions according to Wayang's candidate plan. Do not assume simple sum-of-times composition.}
+\smallurl{https://cs.brown.edu/people/ugur/icde12_learning.pdf}
+\end{frame}
+
+% ============================================================
+% 2. LI ET AL.
+% ============================================================
+\begin{frame}[shrink=10]{2. Robust Estimation of Resource Consumption (VLDB 2012) — model}
+\small
+\textbf{Paper:} J. Li, A. C. König, V. Narasayya, S. Chaudhuri.
+\hfill\paperlink{https://doi.org/10.14778/2350229.2350269}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: features for individual physical operators, drawn from the execution plan and table/index metadata.
+  \item Output: resource-use predictions, particularly CPU time and logical I/O (not just wall-clock latency).
+  \item Examples of features: input table size in tuples/pages, tuple width, estimated I/O cost, index depth, hash operations, join columns, sort columns, and inner-side size for nested loops.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: operator-specific regression + scaling knowledge}
+Separate models are trained for resource type $r$ and operator family $k$:
+\[
+  \widehat{R}_{o,r}=f_{k,r}(\mathbf x_o).
+\]
+The learned predictor uses Multiple Additive Regression Trees (MART). Rather than relying on a single model over whole-query features, each operator family has its own relevant feature set. The method explicitly models asymptotic behaviour so estimates can extrapolate when a feature (e.g., table size) differs substantially from training examples.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{2. Li et al. — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Training examples are generated by executing SQL query plans and recording actual resource consumption.
+  \item Evaluated on Microsoft SQL Server with large benchmark workloads and real-life workloads.
+  \item Labels include CPU time and logical I/O; inputs are plan/metadata features available before execution.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item A plan-template model can fail if a scan/filter is trained on a small table and applied to a table ten times wider or larger. Explicit scaling helps make extrapolation more robust.
+  \item Different operators bottleneck on different features: input cardinality matters to a scan; hash work and key width matter to a hash join; sort volume matters to a sort.
+  \item Resource labels are reusable across pricing policies if Wayang later switches the monetary-cost function.
+\end{itemize}
+\end{block}
+\takeaway{Strong design to copy: operator-specific features, a resource vector instead of one opaque score, and tests that vary cardinality far beyond the training range.}
+\smallurl{https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Resource.pdf}
+\end{frame}
+
+% ============================================================
+% 3. CLEO
+% ============================================================
+\begin{frame}[shrink=10]{3. Cost Models for Big Data Query Processing / Cleo (SIGMOD 2020) — model}
+\small
+\textbf{Paper:} T. Siddiqui, A. Jindal, S. Qiao, H. Patel, W. Le.
+\hfill\paperlink{https://doi.org/10.1145/3318464.3380584}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: SCOPE physical plans, operator/subplan structure, data-volume features, and resource choices (e.g., container count).
+  \item Output: learned execution-cost estimates used to compare plan alternatives and resource allocations; the goal is improved runtime/resource decisions, not an explicit dollar prediction.
+  \item Granularity: specialized models for recurring operator-subgraph patterns, rather than a single end-to-end model for every query.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: many specialised cost functions inside the optimizer}
+\[
+  \widehat C(P,R)=\operatorname{Compose}\bigl(f_{\tau_1}(\mathbf x_1),\ldots,f_{\tau_m}(\mathbf x_m)\bigr),
+\]
+where $\tau_i$ denotes a learned pattern/template of operators and $R$ is a resource configuration. The system learns a collection of models and routes each recognized pattern to its model. It also extends a Cascades-style optimizer to consider resource allocation during planning.
+\end{block}
+\begin{block}{Key methodological point}
+Workload patterns help share data across similar subplans; specialised models provide more coverage and accuracy than forcing every possible plan through one universal predictor.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{3. Cleo — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Production execution traces from Microsoft's SCOPE big-data system, plus TPC-H workload experiments.
+  \item Training labels are observed execution costs/runtimes from prior runs. Features capture recurring patterns in large-scale physical plans and resource allocation.
+  \item The learned models are integrated into the SCOPE optimizer and assessed in a production setting.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Shows how a learned predictor can be made part of the actual enumeration/selection loop, not just an offline query-time estimator.
+  \item Subplan templates can model combinations such as scan--filter, shuffle--join, or join--aggregate where the cost is not purely additive across isolated operators.
+  \item Resource provisioning changes the observed cost; the optimizer can compare plans and number of containers jointly.
+\end{itemize}
+\end{block}
+\takeaway{For Wayang, consider a staged design: start with per-operator models, then add learned subplan models for recurring boundaries (e.g., shuffle + join) when residual errors indicate interactions.}
+\smallurl{https://arxiv.org/abs/2002.12393}
+\end{frame}
+
+% ============================================================
+% 4. QPPNET
+% ============================================================
+\begin{frame}[shrink=10]{4. QPPNet (PVLDB 2019) — model}
+\small
+\textbf{Paper:} R. Marcus, O. Papaemmanouil, ``Plan-Structured Deep Neural Network Models for Query Performance Prediction.''
+\hfill\paperlink{https://doi.org/10.14778/3368289.3368296}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: a physical query plan tree; each node has operator-specific and cardinality/data features available before execution.
+  \item Output: predicted latency. The network mirrors the plan tree, so it can evaluate a plan structure not seen as an exact whole-query template during training.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: one neural unit per operator type}
+For a plan node $v$, let $\mathbf x_v$ be local features and $\mathbf h_c$ be representations/predictions propagated from child nodes:
+\[
+  \mathbf h_v=\phi_{\mathrm{type}(v)}\!\left(\mathbf x_v,\{\mathbf h_c:c\in\mathrm{children}(v)\}\right),
+\]
+\[
+  \widehat T_v=\psi_{\mathrm{type}(v)}(\mathbf h_v,\mathbf x_v).
+\]
+Operator-specific subnetworks learn different cost behaviour. Bottom-up propagation lets the parent model condition on its children's representations, which helps capture plan context beyond an isolated operator feature vector.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{4. QPPNet — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Train on query executions with recorded physical plans and measured latency; the plan structure and timing labels are extracted from executed benchmark workloads.
+  \item The authors evaluate on analytical database workloads; the public reference implementation documents TPC-H queries executed on PostgreSQL and includes generated plans/performance measurements.
+  \item Actual runtimes become supervised targets; optimizer-visible features are inputs at prediction time.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item It learns operator interactions instead of imposing an additive formula by hand.
+  \item The architecture tracks arbitrary plan-tree structure, which is a natural fit for enumerated Wayang plans.
+  \item In exchange, neural inference/training is more complex than a boosted-tree or regression baseline; unseen operator types still need a strategy.
+\end{itemize}
+\end{block}
+\takeaway{Use QPPNet as a higher-capacity baseline after establishing a robust tabular model. Make sure the tree supplied to the model is the candidate Wayang plan, not only a plan chosen by the backend after optimization.}
+\smallurl{https://arxiv.org/abs/1902.00132}\qquad\smallurl{https://github.com/rabbit721/QPPNet}
+\end{frame}
+
+% ============================================================
+% 5. WU
+% ============================================================
+\begin{frame}[shrink=10]{5. A Note on Operator-Level Query Execution Cost Modeling (2020) — method}
+\small
+\textbf{Paper:} Wentao Wu. \hfill\paperlink{https://arxiv.org/abs/2003.04410}{arXiv paper}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: query execution feedback for operators with enough observations, plus the database optimizer's conventional cost estimates.
+  \item Output: a robust operator-level cost estimate, even when some operator types have little or no training feedback.
+  \item This is primarily a framework for combining estimates robustly, not a proposal for one new neural architecture.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: learned where supported, fallback where sparse}
+Let $\widehat C^{\mathrm{ML}}_o$ be the learned estimate and $\widehat C^{\mathrm{base}}_o$ the optimizer's existing estimate. A conceptual hybrid is
+\[
+\widehat C_o=\begin{cases}
+\widehat C^{\mathrm{ML}}_o,&\text{if feedback/model support is sufficient},\\
+\widehat C^{\mathrm{base}}_o,&\text{otherwise.}
+\end{cases}
+\]
+The paper formalises the robustness issues around limited feedback and estimates coming from different modelling techniques, then studies the resulting combination analytically and experimentally.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{5. Wu — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item The learned estimates are based on historical query-execution feedback collected by executing workloads.
+  \item The paper includes a case study in index tuning, where the estimator helps compare physical design choices.
+  \item It is a robustness/framework paper rather than a contribution centered on a new large benchmark corpus or one model architecture.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Wayang may have many platform-specific operators but few observations for some of them.
+  \item A learned model should not be trusted merely because it returns a number: use a minimum sample threshold, uncertainty or validation error, and fall back to a baseline when support is poor.
+  \item Mixing learned resource estimates with analytical time/cost estimates requires clear units and calibration; otherwise the composed plan cost becomes incoherent.
+\end{itemize}
+\end{block}
+\takeaway{Build sparse-data behaviour into the design from the beginning: model coverage, confidence, and fallback are optimizer features—not just ML implementation details.}
+\end{frame}
+
+% ============================================================
+% 6. DRAL
+% ============================================================
+\section{Distributed execution and multi-engine methods}
+\begin{frame}[shrink=10]{6. DRAL: A Learned Cost Model for Big Data Query Processing (2024) — model}
+\small
+\textbf{Venue:} Information Sciences, 2024. \hfill\paperlink{https://doi.org/10.1016/j.ins.2024.120650}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: Spark SQL physical query-plan tree, allocated resource configuration, and local/global data features.
+  \item Output: predicted execution time for the candidate query plan (not a direct dollar charge and not a single isolated operator's runtime).
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: structural encoder + LSTM + resource attention}
+The model encodes each plan node using structural features (including tree connectivity) and semantic/operator features. It also represents local data characteristics associated with plan nodes and global properties of the dataset.
+\[
+  \widehat T_q = f_\theta(\mathcal T_P,\mathbf D_{local},\mathbf D_{global},\mathbf R)
+\]
+A tree-structured, bottom-up representation captures parent--child dependencies; an LSTM models ordered plan information; an adaptive attention mechanism learns which resource features matter under a given configuration. The stated objective is to generalise across data and resource changes.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{6. DRAL — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Historical Spark SQL executions, with physical-plan features paired with measured query execution times.
+  \item Experiments vary cluster resources and data conditions, including data changes/insertions, to study whether the model remains useful without retraining for every shift.
+  \item The paper evaluates on multiple datasets; use the full experimental section for the exact dataset inventory when reproducing its setup.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item It explicitly models a distributed engine's resource configuration, unlike models trained only on operator type and cardinality.
+  \item Local and global data features aim to distinguish the same plan applied to different data.
+  \item It is a whole-plan predictor, so it is better treated as a Spark-specific comparator than as a drop-in per-operator cost function.
+\end{itemize}
+\end{block}
+\takeaway{If starting on Spark, use DRAL to identify relevant resource/data features. For Wayang, consider transferring these features into per-operator models before attempting a full LSTM plan predictor.}
+\end{frame}
+
+% ============================================================
+% 7. T3
+% ============================================================
+\begin{frame}[shrink=10]{7. T3: Query Performance Prediction with Compiled Decision Trees (SIGMOD 2025) — model}
+\small
+\textbf{Paper:} Maximilian Rieger and Thomas Neumann.
+\hfill\paperlink{https://doi.org/10.1145/3725364}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: a relational physical plan decomposed into pipelines, with cardinality and pipeline/operator features.
+  \item Output: the expected processing time per input tuple for each pipeline, then estimated pipeline and query runtime.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: tuple-centric pipeline costing}
+Instead of regressing whole-query runtime directly, T3 learns the expected time to push one tuple through a pipeline:
+\[
+  \widehat{\tau}_p = f_{DT}(\mathbf x_p), \qquad
+  \widehat{T}_p = N^{in}_p\,\widehat{\tau}_p.
+\]
+The pipeline estimates are then combined using pipeline dependencies. T3 uses a decision tree compiled into native machine code to keep inference extremely fast; the pipeline representation and tuple-centric target are designed to generalise to new database instances.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{7. T3 — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item T3 is trained on randomly generated query workloads executed on 20 database instances running the Umbra relational engine.
+  \item The paper evaluates the model on TPC-DS test queries and reports generalisation across database instances without retraining.
+  \item Training labels come from measured pipeline/query execution times; the cardinality is used as a multiplier for the learned per-tuple target.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Separating per-tuple processing cost from input cardinality gives a transparent scaling rule.
+  \item Compiled decision trees make repeated scoring of many candidates cheap—a useful property during plan enumeration.
+  \item It models pipeline execution, not arbitrary distributed Spark operators; shuffles, concurrency, and inter-platform transfers need appropriate treatment in Wayang.
+\end{itemize}
+\end{block}
+\takeaway{A practical baseline to try in Wayang: a fast tree/boosted-tree prediction of per-tuple or per-byte work, multiplied by estimated cardinality/size, with extra terms for fixed overheads.}
+\smallurl{https://db.in.tum.de/~rieger/papers/t3.pdf}
+\end{frame}
+
+% ============================================================
+% 8. CROSS ENGINE
+% ============================================================
+\begin{frame}[shrink=10]{8. Learned Cross-Engine Optimizer (VLDB 2025 workshop) — model}
+\small
+\textbf{Paper:} A. Strausz, N. Pardon, I. Giurgiu.
+\hfill\paperlink{https://www.vldb.org/2025/Workshops/VLDB-Workshops-2025/CDMS/CDMS25_06.pdf}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: an optimized logical Substrait plan, decorated with cardinality/size hints. It is not a native physical plan from each backend.
+  \item Output: predicted query execution time for each engine + provisioning configuration, used to route the query.
+  \item This is a whole-query model, but its multi-engine design is highly relevant to a platform-agnostic optimizer like Wayang.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: shared bottom-up GNN, multiple heads}
+Each typed plan node is encoded into a vector. A bottom-up message-passing step combines a node's own encoding with the sum of its children's embeddings:
+\[
+\mathbf h'_v=\mathrm{MLP}_{type(v)}\!\left(\mathbf h_v\oplus\sum_{u\in children(v)}\mathbf h'_u\right).
+\]
+Relation-node embeddings are mean-pooled into a query embedding $\mathbf z_q$. A predictor head for each engine/provisioning predicts $\widehat T_e=\mathrm{MLP}_e(\mathbf z_q)$. Shared representation lets tasks for different engines help one another.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{8. Cross-engine optimizer — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Query workloads include TPC-H, TPC-DS, IMDB, Stack Overflow, and BIRD's Donor dataset, with additional synthetic queries.
+  \item Queries are executed using several engine/provisioning configurations; observed execution times provide the prediction labels.
+  \item The paper evaluates zero-shot routing and few-shot adaptation when a new engine head is added.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item It demonstrates a shared learned representation across backends instead of training a fully independent query model for every engine.
+  \item The optimized logical plan and cardinality hints are explicit inputs; the model does not require each engine's final native physical plan.
+  \item It predicts whole-query runtime and chooses engines, rather than learning an independent cost function for each Wayang execution operator.
+\end{itemize}
+\end{block}
+\takeaway{Useful future direction if Wayang should transfer knowledge among Java, Spark, and other platforms. A first implementation can still be simpler: shared tabular features + engine/operator identifiers.}
+\smallurl{https://arxiv.org/abs/2506.02802}
+\end{frame}
+
+% ============================================================
+% 9. GANAPATHI
+% ============================================================
+\begin{frame}[shrink=10]{9. Predicting Multiple Metrics for Queries (ICDE 2009) — model}
+\small
+\textbf{Paper:} A. Ganapathi et al.
+\hfill\paperlink{https://doi.org/10.1109/ICDE.2009.130}{Paper link}
+
+\begin{block}{1. Input and output}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item Input: a pre-execution feature vector derived from the SQL or query plan. The best-performing representation summarises the plan by operator-instance counts and cardinality sums for each operator type.
+  \item Output: a vector of observed performance metrics: elapsed time, disk I/Os, message count, message bytes, records accessed, and records used. Memory could be added if available.
+  \item Granularity: whole query, not an operator-by-operator predictor.
+\end{itemize}
+\end{block}
+
+\begin{block}{2. Approach: multi-target statistical prediction with KCCA}
+The paper compares regression-based predictors and joint modeling of multiple metrics. Kernel Canonical Correlation Analysis (KCCA) builds correlated projections of query features $X$ and performance metrics $Y$ using Gaussian kernels. For a new query, it finds nearby queries in the learned query projection and estimates its performance vector from the corresponding neighbours:
+\[
+  \widehat{\mathbf y}(x)\approx\frac{1}{k}\sum_{i\in\mathcal N_k(x)}\mathbf y_i.
+\]
+The motivation is to learn correlations between the resource metrics, not to train a separate unrelated predictor for every output.
+\end{block}
+\end{frame}
+
+\begin{frame}[shrink=10]{9. Ganapathi et al. — data, findings, and relevance}
+\small
+\begin{block}{3. Training data}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Runs of TPC-DS and additional long-running query templates, including templates motivated by real enterprise queries.
+  \item System: HP Neoview data warehouse. Runs on different node configurations provide both input features and actual metric labels.
+  \item Inputs are static pre-execution query/plan features; labels are collected from executions and include wall-clock and resource metrics.
+\end{itemize}
+\end{block}
+\begin{block}{Why the method is useful}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Shows the value of predicting a resource vector rather than one single cost value.
+  \item Cardinality summaries and operator counts are a simple feature representation to establish a baseline before training more complex tree/graph models.
+  \item Since the model is whole-query, it is complementary to per-operator costing rather than a direct replacement.
+\end{itemize}
+\end{block}
+\takeaway{Good baseline idea: learn CPU/I/O/network-related targets alongside runtime, then convert predicted resource loads to monetary cost through a separate pricing model.}
+\smallurl{https://www.researchgate.net/publication/220966297_Predicting_Multiple_Metrics_for_Queries_Better_Decisions_Enabled_by_Machine_Learning}
+\end{frame}
+
+% ============================================================
+% SYNTHESIS
+% ============================================================
+\section{Recommendation for Wayang}
+\begin{frame}[shrink=10]{Cross-paper comparison: what is actually learned?}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}p{2.5cm}p{2.3cm}p{2.1cm}X@{}}
+\toprule
+\textbf{Paper} & \textbf{Granularity} & \textbf{Target} & \textbf{Main idea} \\
+\midrule
+Akdere (ICDE'12) & Operator + children & Start / total time & Compose start-time and subtree-runtime models. \\
+Li (VLDB'12) & Operator & CPU, logical I/O & Per-operator features plus scaling-aware regression. \\
+Cleo (SIGMOD'20) & Subgraph patterns & Optimizer cost & Specialized learned models integrated into enumeration. \\
+QPPNet (PVLDB'19) & Plan tree & Query latency & Neural unit per operator; child representations flow upward. \\
+Wu (2020) & Operator + fallback & Cost estimate & Handle sparse feedback and mixed model sources. \\
+DRAL (2024) & Spark query plan & Runtime & LSTM/attention plus data/resource features. \\
+T3 (SIGMOD'25) & Pipeline & Per-tuple time & Compiled tree; multiply by input cardinality. \\
+Cross-engine (VLDB WS'25) & Logical plan & Runtime per engine & Shared GNN embedding with engine-specific heads. \\
+Ganapathi (ICDE'09) & Whole query & Multiple metrics & KCCA learns correlations among resource metrics. \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}[shrink=10]{Recommended Wayang architecture: baseline first, interactions next}
+\small
+\begin{enumerate}\setlength\itemsep{3pt}
+  \item \textbf{Collect operator-level observations.} For each executed candidate/operator, record platform operator type, input/output cardinalities and bytes, partition count, resource config, elapsed time, CPU, I/O, shuffle/network metrics when available.
+  \item \textbf{Train a robust tabular baseline.} One model per operator family (or one shared model with operator/platform embeddings); start with gradient-boosted trees. Compare against Wayang's current load-profile estimator.
+  \item \textbf{Predict a vector, not only dollars.} Estimate CPU time, shuffle bytes, disk I/O and possibly elapsed time. This keeps the target separable from cloud billing rules.
+  \item \textbf{Compose in Wayang's semantics.} Model pipelining, blocking operators, parallelism and cross-platform data transfer. Avoid simply summing operator wall-clock times unless sequential execution is guaranteed.
+  \item \textbf{Add subplan models only where needed.} If errors cluster around shuffle--join or join--aggregate patterns, learn those patterns as a second stage (Cleo-style) instead of immediately adopting a large GNN/LSTM.
+  \item \textbf{Fallback when data is sparse.} Use existing estimates for poorly observed operator/platform combinations; expose confidence or training-support counts.
+\end{enumerate}
+\end{frame}
+
+\begin{frame}[shrink=10]{Keep monetary pricing separate from the learned predictor}
+\small
+A learned model can predict execution behaviour; a pricing layer converts that prediction to money. Keeping the two separate allows the same learned model to be reused when cloud prices or billing rules change.
+\begin{block}{General formulation}
+\[
+\widehat C_{\$}(P,e)=g_{\pi_e}\!\left(\widehat{\mathbf L}(P,e),\mathbf r_e\right)
+\]
+where $\widehat{\mathbf L}$ is the predicted resource vector, $\mathbf r_e$ is the selected configuration, and $\pi_e$ is the provider/engine pricing policy.
+\end{block}
+\begin{block}{Example: hourly virtual machines}
+If a query is billed by instance runtime, a simplified estimate is
+\[
+\widehat C_{\$}=n_{VM}\,\frac{\widehat T_{sec}}{3600}\,p_{hour}+C_{transfer}+C_{storage}.
+\]
+For serverless/query services, use their real billing unit instead (e.g., bytes scanned or billed slot-time). Include rounding, minimum charges, idle time, and any inter-platform transfer charge required by the actual policy.
+\end{block}
+\takeaway{Do not train on a dollar label unless you specifically want a provider-specific predictor. Predict reusable resource quantities, then apply an explicit pricing function.}
+\end{frame}
+
+\begin{frame}[shrink=10]{Training labels and an evaluation protocol}
+\small
+\begin{block}{Training record per operator instance}
+\[
+(\underbrace{o,e,\widehat N_{in},\widehat N_{out},\widehat B,\mathbf r}_{\text{pre-execution features}},\quad
+\underbrace{T_{obs},CPU_{obs},IO_{obs},Shuffle_{obs}}_{\text{execution labels}})
+\]
+Use only features available for every candidate at optimization time. If cardinality estimates are the intended inputs, do not train/evaluate only on actual runtime cardinalities.
+\end{block}
+\begin{block}{Evaluate both prediction and decision quality}
+\begin{itemize}\setlength\itemsep{2pt}
+  \item Prediction: MAE/RMSE on log runtime, median and 90th-percentile Q-error, per-operator error by cardinality range.
+  \item Generalization: hold out query templates, data scales, engines/configurations, and (where possible) unseen operator patterns.
+  \item Optimizer value: regret of selected plan versus best observed plan, ranking accuracy between candidate plans, and execution cost saved.
+\end{itemize}
+\end{block}
+\takeaway{A model with slightly worse regression metrics can still be a better optimizer model if it reliably ranks the cheapest candidate plans first.}
+\end{frame}
+
+\begin{frame}[shrink=10]{Paper links (1/2)}
+\small
+\begin{enumerate}\setlength\itemsep{5pt}
+\item Akdere et al., \emph{Learning-based Query Performance Modeling and Prediction}, ICDE 2012.\\
+\paperlink{https://doi.org/10.1109/ICDE.2012.64}{DOI} \;|\; \paperlink{https://cs.brown.edu/people/ugur/icde12_learning.pdf}{PDF}
+\item Li et al., \emph{Robust Estimation of Resource Consumption for SQL Queries using Statistical Techniques}, VLDB 2012.\\
+\paperlink{https://doi.org/10.14778/2350229.2350269}{DOI} \;|\; \paperlink{https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/Resource.pdf}{PDF}
+\item Siddiqui et al., \emph{Cost Models for Big Data Query Processing: Learning, Retrofitting, and Our Findings}, SIGMOD 2020.\\
+\paperlink{https://doi.org/10.1145/3318464.3380584}{DOI} \;|\; \paperlink{https://arxiv.org/abs/2002.12393}{arXiv}
+\item Marcus and Papaemmanouil, \emph{Plan-Structured Deep Neural Network Models for Query Performance Prediction}, PVLDB 2019.\\
+\paperlink{https://doi.org/10.14778/3368289.3368296}{DOI} \;|\; \paperlink{https://arxiv.org/abs/1902.00132}{arXiv} \;|\; \paperlink{https://github.com/rabbit721/QPPNet}{Code}
+\item Wu, \emph{A Note On Operator-Level Query Execution Cost Modeling}, 2020.\\
+\paperlink{https://arxiv.org/abs/2003.04410}{arXiv}
+\end{enumerate}
+\end{frame}
+
+\begin{frame}[shrink=10]{Paper links (2/2)}
+\small
+\begin{enumerate}\setlength\itemsep{5pt}
+\item Li et al., \emph{A Learned Cost Model for Big Data Query Processing} (DRAL), Information Sciences 2024.\\
+\paperlink{https://doi.org/10.1016/j.ins.2024.120650}{DOI}
+\item Rieger and Neumann, \emph{T3: Accurate and Fast Performance Prediction for Relational Database Systems With Compiled Decision Trees}, SIGMOD 2025.\\
+\paperlink{https://doi.org/10.1145/3725364}{DOI} \;|\; \paperlink{https://db.in.tum.de/~rieger/papers/t3.pdf}{PDF}
+\item Strausz, Pardon, and Giurgiu, \emph{A Learned Cost Model-based Cross-engine Optimizer for SQL Workloads}, VLDB 2025 workshop.\\
+\paperlink{https://arxiv.org/abs/2506.02802}{arXiv} \;|\; \paperlink{https://github.com/strausza-ibm/cross-engine-optim-artifacts}{Artifacts}
+\item Ganapathi et al., \emph{Predicting Multiple Metrics for Queries: Better Decisions Enabled by Machine Learning}, ICDE 2009.\\
+\paperlink{https://doi.org/10.1109/ICDE.2009.130}{DOI}
+\end{enumerate}
+\vspace{4mm}
+\centering\textcolor{WayangNavy}{\Large Start with Akdere + Li + Cleo; use QPPNet/T3 as more expressive modelling alternatives.}
+\end{frame}
+
+\end{document}
